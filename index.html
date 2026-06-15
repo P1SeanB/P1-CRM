@@ -15,7 +15,7 @@
    │  Level Security + Auth are enabled — no login, no data.       │
    │  NEVER paste the service_role key here.                       │
    └──────────────────────────────────────────────────────────────┘ */
-const SB_URL  = 'https://qltxsccrdudspnznvcot.supabase.co';   // e.g. https://abcd1234.supabase.co
+const SB_URL  = 'https://qltxsccrdudspnznvcot.supabase.co';   // pre-filled (your project URL)
 const SB_ANON = 'sb_publishable_Sz7JzpRpHy7a_INZ1qAzzQ_x9brZbeZ';
 let sb = null;
 (function initSupabase(){
@@ -78,6 +78,34 @@ async function saveAllToCloud(){
 }
 function saveDataCloud(){ clearTimeout(_saveTimer); _saveTimer=setTimeout(saveAllToCloud,1200); }
 async function signOutCloud(){ await sb.auth.signOut(); location.reload(); }
+
+/* Small key/value flags stored in the cloud (e.g. whether the generated
+   invoice history has been baked in). Resilient: returns null on any error. */
+async function getMeta(key){
+  try{ const { data } = await sb.from('app_meta').select('value').eq('key',key).maybeSingle(); return data ? data.value : null; }
+  catch(e){ return null; }
+}
+async function setMeta(key,value){
+  try{ await sb.from('app_meta').upsert({ key, value }); }catch(e){ console.error('setMeta failed',e); }
+}
+
+/* Auto sign-out after a period of no user activity (mouse/keyboard/scroll/touch).
+   Change IDLE_LIMIT_MS to adjust. 2 hours = 2*60*60*1000. */
+const IDLE_LIMIT_MS = 2 * 60 * 60 * 1000;
+let _idleTimer = null;
+function installIdleLogout(){
+  const reset = () => {
+    clearTimeout(_idleTimer);
+    _idleTimer = setTimeout(async () => {
+      try { if (sb) await sb.auth.signOut(); } catch(e){}
+      alert('Signed out after 2 hours of inactivity. Please sign in again.');
+      location.reload();
+    }, IDLE_LIMIT_MS);
+  };
+  ['mousemove','mousedown','keydown','scroll','touchstart','click'].forEach(ev =>
+    document.addEventListener(ev, reset, { passive: true }));
+  reset();
+}
 </script>
 <!-- ═════════════════════════════════════════════════════════════ -->
 <style>
@@ -340,7 +368,7 @@ table.inv-list tr.unbilled:hover td { background: #fff5d6; }
     <button class="hbtn hbtn-accent" onclick="exportCSV()">⬇ Export Excel</button>
     <button class="hbtn hbtn-outline" onclick="saveData()">💾 Save</button>
     <button class="hbtn hbtn-outline" onclick="loadFromFile()">📂 Load</button>
-    <button class="hbtn hbtn-outline" onclick="reloadBuiltInData()" title="Discard local edits and reload the built-in records (incl. A/P billing info)">↻ Reload Built-In Data</button>
+    <button class="hbtn hbtn-outline" onclick="refreshFromCloud()" title="Pull the latest data from the cloud">🔄 Refresh from Cloud</button>
     <input type="file" id="load-file" accept=".json,.xlsx" style="display:none" onchange="handleFileLoad(event)">
   </div>
   <div class="header-stats">
@@ -912,7 +940,12 @@ async function init() {
   // Nothing loads until login succeeds — that is what keeps the data secured
   // even though this page (and its anon key) are public.
   if (!(await ensureSignedIn())) return;
+  installIdleLogout();   // auto sign-out after 2h of inactivity
   await loadAllFromCloud();
+  // If the generated history has already been baked into the cloud, the cloud is
+  // the single source of truth — skip every generator below so deletes and edits
+  // persist instead of being regenerated on each load.
+  if (await getMeta('seeded_committed') === 'true') { renderList(); return; }
   // Seed invoiceDB from existing Last Invoice# data
   DB.forEach((r, idx) => {
     const key = makeKey(r);
@@ -2378,6 +2411,11 @@ async function init() {
   applyLastInvoice();
   normalizeSharedKeyTemplated();
   renderList();
+  // One-time bake: the generators above just built the full history. Persist it
+  // to the cloud and mark it so they never run again — from now on the cloud is
+  // authoritative and your deletes/edits stick.
+  try { await saveAllToCloud(); await setMeta('seeded_committed','true'); }
+  catch(e){ console.error('initial bake failed', e); }
 }
 
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
@@ -2391,14 +2429,10 @@ function saveData() {
   saveDataCloud();
 }
 
-// Discard the locally-saved copy and reload the built-in data shipped with this
-// file (includes the latest A/P billing info). Invoices are preserved.
-function reloadBuiltInData() {
-  if (!confirm('Reload the built-in data shipped with this app?\n\nThis replaces the current account list (including any unsaved edits) with the built-in records and their A/P billing info. Your invoice history is kept.')) return;
-  try {
-    localStorage.removeItem('p1_crm_db');
-    localStorage.removeItem('p1_crm_db_version');
-  } catch(e) {}
+// Pull the latest data from Supabase (e.g. to see changes made on another
+// device). Reloading the page re-runs init(), which loads from the cloud.
+function refreshFromCloud() {
+  if (!confirm('Refresh from the cloud?\n\nThis reloads the latest saved data from Supabase. Any edit you have made is already auto-saved, so nothing is lost.')) return;
   location.reload();
 }
 
@@ -2684,12 +2718,39 @@ function exportCSV() {
 
 
 // ── New Agreement Modal ────────────────────────────────────────────────────
+let naSiteSeq = 0;
+function addSiteRow(addr='', csz='', cs='', charge='') {
+  naSiteSeq++;
+  const wrap = document.getElementById('na-sites');
+  const div = document.createElement('div');
+  div.className = 'na-site-row';
+  div.style.cssText = 'border:1px solid #ddd;border-radius:7px;padding:10px;margin-bottom:8px;position:relative;';
+  div.innerHTML = `
+    <div class="modal-grid">
+      <div class="fg"><label>Site Address</label><input class="na-s-addr" placeholder="e.g. 456 Elm St" value="${esc(addr)}"></div>
+      <div class="fg"><label>Site City, State, Zip</label><input class="na-s-csz" placeholder="e.g. San Jose, CA 95138" value="${esc(csz)}"></div>
+    </div>
+    <div class="modal-grid" style="margin-top:8px;">
+      <div class="fg"><label>Site CS Account # <span style="font-weight:400;color:#999">(blank = same as main)</span></label><input class="na-s-cs" value="${esc(cs)}"></div>
+      <div class="fg"><label>Site Monthly Charge <span style="font-weight:400;color:#999">(blank = same as main)</span></label><input class="na-s-charge" value="${esc(charge)}"></div>
+    </div>
+    <button type="button" title="Remove this site" onclick="this.closest('.na-site-row').remove()" style="position:absolute;top:6px;right:8px;background:none;border:none;color:#dc2626;font-size:1rem;cursor:pointer;line-height:1;">✕</button>`;
+  wrap.appendChild(div);
+}
+
+const NA_AP_IDS = ['na-ap-name','na-ap-title','na-ap-email','na-ap-cc','na-ap-phone','na-ap-delivery','na-ap-portal-name','na-ap-portal-url','na-ap-delivery-notes','na-ap-payment-method','na-ap-payment-notes'];
+
 function openNewAgreement() {
   // Populate services checkboxes
   const checks = document.getElementById('na-svc-checks');
   checks.innerHTML = SERVICES.map(s => `
     <label><input type="checkbox" value="${s}"> ${(SVC_DESCRIPTIONS[s]||{short:s}).short}</label>
   `).join('');
+  // Reset sites to a single empty row
+  document.getElementById('na-sites').innerHTML = '';
+  addSiteRow();
+  // Clear A/P fields
+  NA_AP_IDS.forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
   document.getElementById('new-agr-overlay').style.display = 'block';
   document.getElementById('na-error').style.display = 'none';
 }
@@ -2698,9 +2759,11 @@ function closeNewAgreement() {
   document.getElementById('new-agr-overlay').style.display = 'none';
   // Clear all fields
   ['na-agr','na-swo','na-cs','na-custnum','na-custname','na-acctname',
-   'na-addr','na-csz','na-site-addr','na-site-csz','na-charge',
-   'na-eff','na-exp','na-po','na-notes','na-cfirst','na-clast','na-cphone','na-cemail'
+   'na-addr','na-csz','na-charge',
+   'na-eff','na-exp','na-po','na-notes','na-cfirst','na-clast','na-cphone','na-cemail',
+   ...NA_AP_IDS
   ].forEach(id => { const el = document.getElementById(id); if(el) el.value = ''; });
+  document.getElementById('na-sites').innerHTML = '';
 }
 
 function saveNewAgreement() {
@@ -2713,61 +2776,95 @@ function saveNewAgreement() {
   if (!g('na-custname')) { errEl.textContent = 'Customer Name is required.'; errEl.style.display='inline'; return; }
   if (!g('na-acctname')) { errEl.textContent = 'Account Name is required.'; errEl.style.display='inline'; return; }
   if (!g('na-cs')) { errEl.textContent = 'CS Account # is required.'; errEl.style.display='inline'; return; }
-  // Check for duplicate agreement#+CS
-  const dupKey = `agr${agrNum}_cs${g('na-cs')}`;
-  if (DB.find(r => makeKey(r) === dupKey)) {
-    errEl.textContent = `Agreement #${agrNum} with CS Account ${g('na-cs')} already exists.`;
-    errEl.style.display='inline'; return;
+
+  const baseCS = g('na-cs');
+  const baseCharge = g('na-charge');
+
+  // Collect site rows; if none have data, fall back to a single blank site.
+  let sites = [...document.querySelectorAll('#na-sites .na-site-row')].map(row => ({
+    addr:   (row.querySelector('.na-s-addr')||{}).value?.trim()   || '',
+    csz:    (row.querySelector('.na-s-csz')||{}).value?.trim()    || '',
+    cs:     (row.querySelector('.na-s-cs')||{}).value?.trim()     || '',
+    charge: (row.querySelector('.na-s-charge')||{}).value?.trim() || '',
+  }));
+  if (!sites.length) sites = [{addr:'',csz:'',cs:'',charge:''}];
+
+  // Duplicate check against EXISTING agreements (each site's resolved CS key).
+  for (const s of sites) {
+    const key = `agr${agrNum}_cs${s.cs || baseCS}`;
+    if (DB.find(r => makeKey(r) === key)) {
+      errEl.textContent = `Agreement #${agrNum} with CS Account ${s.cs || baseCS} already exists.`;
+      errEl.style.display='inline'; return;
+    }
   }
 
-  // Build selected services
-  const svcChecks = document.querySelectorAll('#na-svc-checks input[type=checkbox]:checked');
+  // Selected services
   const svcObj = {};
-  svcChecks.forEach(cb => { svcObj[cb.value] = 'YES'; });
+  document.querySelectorAll('#na-svc-checks input[type=checkbox]:checked').forEach(cb => { svcObj[cb.value] = 'YES'; });
 
-  // Build new record matching RAW_DATA schema
-  const newRecord = {
-    'Agreement#': agrNum,
-    'SWO#': g('na-swo'),
-    'Central Station Account#': g('na-cs'),
-    'Customer#': parseFloat(g('na-custnum'))||'',
-    'Customer Name': g('na-custname'),
-    'Account Name': g('na-acctname'),
-    'System Type': g('na-systype'),
-    'Site Type': g('na-sitetype'),
-    'Monthly Billing Charge': g('na-charge'),
-    'Billing Address': g('na-addr'),
-    'City State Zip': g('na-csz'),
-    'Site Address': g('na-site-addr'),
-    'Site City State Zip': g('na-site-csz'),
-    'Agreement Effective Date': g('na-eff'),
-    'Agreement Expiration Date': g('na-exp'),
-    'Agreement Status': g('na-status'),
-    'Payment Terms': g('na-terms'),
-    'Billing Frequency': g('na-freq'),
-    'Customer PO': g('na-po'),
-    'Other Billing Notes': g('na-notes'),
-    'Contact First Name': g('na-cfirst'),
-    'Contact Last Name': g('na-clast'),
-    'Contact Phone': g('na-cphone'),
-    'Contact Email': g('na-cemail'),
-    'Last Invoice#': '', 'Last Invoice Date': '', 'Last Invoice Amount': '',
-    ...svcObj
+  // Accounts Payable (shared across all sites)
+  const apObj = {
+    'AP Contact Name': g('na-ap-name'),
+    'AP Contact Title': g('na-ap-title'),
+    'AP Contact Email': g('na-ap-email'),
+    'AP Contact CC': g('na-ap-cc'),
+    'AP Contact Phone': g('na-ap-phone'),
+    'AP Delivery Method': g('na-ap-delivery'),
+    'AP Portal Name': g('na-ap-portal-name'),
+    'AP Portal URL': g('na-ap-portal-url'),
+    'AP Delivery Notes': g('na-ap-delivery-notes'),
+    'AP Payment Method': g('na-ap-payment-method'),
+    'AP Payment Notes': g('na-ap-payment-notes'),
   };
 
-  // Add to DB and invoiceDB
-  DB.push(newRecord);
-  invoiceDB[dupKey] = [];
+  // Create one record per site, sharing everything except site fields / overrides.
+  let firstIdx = null;
+  sites.forEach(s => {
+    const rec = {
+      'Agreement#': agrNum,
+      'SWO#': g('na-swo'),
+      'Central Station Account#': s.cs || baseCS,
+      'Customer#': parseFloat(g('na-custnum'))||'',
+      'Customer Name': g('na-custname'),
+      'Account Name': g('na-acctname'),
+      'System Type': g('na-systype'),
+      'Site Type': g('na-sitetype'),
+      'Monthly Billing Charge': s.charge || baseCharge,
+      'Billing Address': g('na-addr'),
+      'City State Zip': g('na-csz'),
+      'Site Address': s.addr,
+      'Site City State Zip': s.csz,
+      'Agreement Effective Date': g('na-eff'),
+      'Agreement Expiration Date': g('na-exp'),
+      'Agreement Status': g('na-status'),
+      'Payment Terms': g('na-terms'),
+      'Billing Frequency': g('na-freq'),
+      'Customer PO': g('na-po'),
+      'Other Billing Notes': g('na-notes'),
+      'Contact First Name': g('na-cfirst'),
+      'Contact Last Name': g('na-clast'),
+      'Contact Phone': g('na-cphone'),
+      'Contact Email': g('na-cemail'),
+      'Last Invoice#': '', 'Last Invoice Date': '', 'Last Invoice Amount': '',
+      ...apObj,
+      ...svcObj
+    };
+    DB.push(rec);
+    const k = makeKey(rec);
+    if (!invoiceDB[k]) invoiceDB[k] = [];
+    if (firstIdx === null) firstIdx = DB.length - 1;
+  });
+
   saveData();
   renderList();
 
-  // Select the new account
-  const newIdx = DB.length - 1;
-  selectedIdx = newIdx;
-  renderDetail(DB[newIdx]);
+  // Select the first new site
+  selectedIdx = firstIdx;
+  renderDetail(DB[firstIdx]);
 
   closeNewAgreement();
-  showNotice(`✓ Agreement #${agrNum} added — ${g('na-acctname')}`);
+  const n = sites.length;
+  showNotice(`✓ Agreement #${agrNum} added${n>1?` — ${n} sites`:''} — ${g('na-acctname')}`);
 }
 
 function showNotice(msg) {
@@ -5232,10 +5329,6 @@ init();
           <div class="fg"><label>Billing Address</label><input id="na-addr" placeholder="e.g. 123 Main St"></div>
           <div class="fg"><label>City, State, Zip</label><input id="na-csz" placeholder="e.g. Oakland, CA 94607"></div>
         </div>
-        <div class="modal-grid" style="margin-top:10px;">
-          <div class="fg"><label>Site Address (if different)</label><input id="na-site-addr" placeholder="e.g. 456 Elm St"></div>
-          <div class="fg"><label>Site City, State, Zip</label><input id="na-site-csz" placeholder="e.g. San Jose, CA 95138"></div>
-        </div>
         <div class="modal-grid cols3" style="margin-top:10px;">
           <div class="fg"><label>Billing Frequency</label>
             <select id="na-freq">
@@ -5257,6 +5350,13 @@ init();
         <div class="modal-grid full" style="margin-top:10px;">
           <div class="fg"><label>Billing Notes</label><textarea id="na-notes" rows="2" placeholder="Optional notes..."></textarea></div>
         </div>
+      </div>
+
+      <!-- Sites (one or more) -->
+      <div class="modal-section">
+        <h3>Site(s) <span style="font-weight:400;font-size:0.78rem;color:#888">— one row per location; multiple rows create a multi-site agreement (one record per site)</span></h3>
+        <div id="na-sites"></div>
+        <button type="button" class="hbtn hbtn-outline" style="margin-top:8px;font-size:0.8rem;" onclick="addSiteRow()">＋ Add Site</button>
       </div>
 
       <!-- Contact -->
@@ -5287,6 +5387,32 @@ init();
               <option>Active</option><option>Terminated</option>
             </select>
           </div>
+        </div>
+      </div>
+
+      <!-- Accounts Payable (optional) -->
+      <div class="modal-section">
+        <h3>Accounts Payable <span style="font-weight:400;font-size:0.78rem;color:#888">— optional; drives invoice email To / CC</span></h3>
+        <div class="modal-grid cols3">
+          <div class="fg"><label>AP Contact Name</label><input id="na-ap-name" placeholder="Optional"></div>
+          <div class="fg"><label>AP Contact Title</label><input id="na-ap-title" placeholder="Optional"></div>
+          <div class="fg"><label>AP Contact Phone</label><input id="na-ap-phone" placeholder="Optional"></div>
+        </div>
+        <div class="modal-grid" style="margin-top:10px;">
+          <div class="fg"><label>AP Contact Email (invoice "To")</label><input id="na-ap-email" type="email" placeholder="Optional"></div>
+          <div class="fg"><label>AP CC Email(s) (invoice "CC")</label><input id="na-ap-cc" placeholder="comma-separated"></div>
+        </div>
+        <div class="modal-grid cols3" style="margin-top:10px;">
+          <div class="fg"><label>Delivery Method</label><input id="na-ap-delivery" placeholder="Email / Portal / Mail"></div>
+          <div class="fg"><label>Portal Name</label><input id="na-ap-portal-name" placeholder="Optional"></div>
+          <div class="fg"><label>Portal URL</label><input id="na-ap-portal-url" placeholder="Optional"></div>
+        </div>
+        <div class="modal-grid" style="margin-top:10px;">
+          <div class="fg"><label>Delivery Notes</label><input id="na-ap-delivery-notes" placeholder="Optional"></div>
+          <div class="fg"><label>Payment Method</label><input id="na-ap-payment-method" placeholder="Optional"></div>
+        </div>
+        <div class="modal-grid full" style="margin-top:10px;">
+          <div class="fg"><label>Payment Notes</label><textarea id="na-ap-payment-notes" rows="2" placeholder="Optional notes..."></textarea></div>
         </div>
       </div>
 
