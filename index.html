@@ -3972,6 +3972,10 @@ function sysSiteLabel(rec, n){
   const a = String(rec['Site Address']||'').trim();
   const c = String(rec['Site City State Zip']||'').trim();
   if (a) return a + (c?(', '+c):'');
+  // Multi-site agreements often leave Site Address blank but carry the
+  // distinguishing location in the Account Name (e.g. "…Bldg 1670").
+  const an = String(rec['Account Name']||'').trim();
+  if (an) return an;
   return 'Site '+n;
 }
 // The record that holds the Systems array (whichever has it; else the first site).
