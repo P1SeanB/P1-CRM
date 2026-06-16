@@ -154,6 +154,25 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--gray1);
 #new-agr-modal .svc-checks { display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; margin-top:4px; }
 #new-agr-modal .svc-checks label { text-transform:none; letter-spacing:0; font-size:0.8rem; font-weight:400; display:flex; align-items:center; gap:6px; cursor:pointer; }
 
+#new-inv-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1000; overflow-y:auto; padding:30px 16px; }
+#new-inv-modal { background:#fff; border-radius:10px; max-width:680px; margin:0 auto; box-shadow:0 8px 40px rgba(0,0,0,0.25); overflow:hidden; }
+#new-inv-modal .modal-header { background:var(--navy); color:#fff; padding:16px 22px; display:flex; justify-content:space-between; align-items:center; }
+#new-inv-modal .modal-header h2 { font-size:1rem; font-weight:700; margin:0; }
+#new-inv-modal .modal-body { padding:20px 22px; }
+#new-inv-modal .modal-section { margin-bottom:18px; }
+#new-inv-modal .modal-section h3 { font-size:0.72rem; text-transform:uppercase; letter-spacing:.06em; color:var(--gray4); font-weight:700; margin-bottom:10px; padding-bottom:4px; border-bottom:1px solid var(--gray2); }
+#new-inv-modal .modal-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+#new-inv-modal .modal-grid.cols3 { grid-template-columns:1fr 1fr 1fr; }
+#new-inv-modal .modal-grid.full { grid-template-columns:1fr; }
+#new-inv-modal .fg { display:flex; flex-direction:column; gap:4px; }
+#new-inv-modal .fg.span2 { grid-column:span 2; }
+#new-inv-modal label { font-size:0.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--gray4); font-weight:600; }
+#new-inv-modal input, #new-inv-modal select, #new-inv-modal textarea { padding:7px 10px; border:1.5px solid var(--gray3); border-radius:6px; font-size:0.83rem; font-family:inherit; outline:none; }
+#new-inv-modal input:focus, #new-inv-modal select:focus, #new-inv-modal textarea:focus { border-color:var(--blue); }
+#new-inv-modal .modal-footer { padding:14px 22px; background:#f8f9fa; border-top:1px solid var(--gray2); display:flex; justify-content:flex-end; gap:10px; align-items:center; }
+#new-inv-modal .svc-checks { display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; margin-top:4px; }
+#new-inv-modal .svc-checks label { text-transform:none; letter-spacing:0; font-size:0.8rem; font-weight:400; display:flex; align-items:center; gap:6px; cursor:pointer; }
+
 #app { display: flex; height: calc(100vh - 63px); }
 #sidebar { width: 340px; min-width: 280px; background: var(--white); border-right: 1px solid var(--gray3); display: flex; flex-direction: column; overflow: hidden; }
 #main { flex: 1; overflow-y: auto; background: var(--gray1); }
@@ -948,7 +967,6 @@ async function init() {
   if (!(await ensureSignedIn())) return;
   installIdleLogout();   // auto sign-out after 2h of inactivity
   await loadAllFromCloud();
-  // Blank development build: data lives in Supabase; seed generators stripped.
   renderList();
 }
 
@@ -1416,6 +1434,119 @@ function saveNewAgreement() {
   showNotice(`✓ Agreement #${agrNum} added${n>1?` — ${n} sites`:''} — ${g('na-acctname')}`);
 }
 
+// ---- Custom Invoice Builder ----
+const SVC_BY_SYSTEM = {
+  fire:    ['Central Station Monitoring','NFPA72 Fire Alarm Inspections','NFPA25 Sprinkler inspections','BuildingReport.com','Underwriters Laborty Certificate','Honeywell Communicator Services','Telguard Communicator Services'],
+  burglar: ['Central Station Monitoring','Alarm.com Services','ConnectOne Services','Bosch Cloud Services','Honeywell Communicator Services','Telguard Communicator Services','San Francisco Alarm Permit'],
+  access:  ['Access Control Hosting Services','Alarm.com Services','Central Station Monitoring']
+};
+function servicesForSystemType(st){
+  const k = String(st||'').toLowerCase();
+  let list;
+  if (/fire/.test(k)) list = SVC_BY_SYSTEM.fire;
+  else if (/burg|intr/.test(k)) list = SVC_BY_SYSTEM.burglar;
+  else if (/access/.test(k)) list = SVC_BY_SYSTEM.access;
+  else list = SERVICES_LIST.slice();
+  // keep only services we actually have definitions for, preserve order
+  return list.filter(s => SERVICES_LIST.indexOf(s) !== -1);
+}
+function agrBillingAddresses(agr){
+  const sibs = DB.filter(x => String(x['Agreement#']) === String(agr));
+  const seen = new Set(), out = [];
+  sibs.forEach(s => {
+    const a = [s['Customer Name'], s['Billing Address'], s['City State Zip']].filter(Boolean).join(', ');
+    if (a && !seen.has(a)) { seen.add(a); out.push(a); }
+  });
+  return out;
+}
+function agrSiteList(agr){
+  const sibs = DB.filter(x => String(x['Agreement#']) === String(agr));
+  return sibs.map(s => ({
+    label: s['Account Name'] || s['Customer Name'] || 'Site',
+    siteAddr: s['Site Address'] || '',
+    csz: s['Site City State Zip'] || ''
+  }));
+}
+function openNewInvoice(){
+  if (selectedIdx === null) return;
+  const r = DB[selectedIdx];
+  const agr = String(r['Agreement#']);
+  const g = id => document.getElementById(id);
+  // Bill To dropdown
+  const baddrs = agrBillingAddresses(agr);
+  const curBill = [r['Customer Name'], r['Billing Address'], r['City State Zip']].filter(Boolean).join(', ');
+  const billOpts = baddrs.length ? baddrs : [curBill];
+  g('ni-billto').innerHTML = billOpts.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
+  // Site dropdown
+  const sites = agrSiteList(agr);
+  window._niSites = sites;
+  g('ni-site').innerHTML = sites.map((s,i) => `<option value="${i}">${esc(s.label)}${s.siteAddr?(' — '+esc(s.siteAddr)):''}</option>`).join('');
+  // pre-select the site matching the current record if multi-site
+  const curIdx = sites.findIndex(s => s.label === (r['Account Name']||r['Customer Name']));
+  if (curIdx >= 0) g('ni-site').value = String(curIdx);
+  // Services by system type (unchecked)
+  const svcs = servicesForSystemType(r['System Type']);
+  g('ni-services').innerHTML = svcs.map(s => `<label><input type="checkbox" value="${esc(s)}"> ${esc((SVC_DESCRIPTIONS[s]||{short:s}).short)}</label>`).join('');
+  // Defaults
+  g('ni-type').value = 'T&M';
+  g('ni-date').value = new Date().toISOString().slice(0,10);
+  g('ni-num').value = '';
+  g('ni-amount').value = '';
+  g('ni-po').value = (r['Customer PO'] && r['Customer PO']!=='--') ? r['Customer PO'] : '';
+  g('ni-terms').value = r['Payment Terms'] || 'Net 30 Days';
+  g('ni-notes').value = '';
+  g('ni-title').textContent = '➕ New Invoice — ' + (r['Account Name'] || r['Customer Name'] || '');
+  g('ni-error').style.display = 'none';
+  document.getElementById('new-inv-overlay').style.display = 'block';
+}
+function closeNewInvoice(){
+  document.getElementById('new-inv-overlay').style.display = 'none';
+}
+function saveNewInvoice(){
+  if (selectedIdx === null) return;
+  const r = DB[selectedIdx];
+  const key = makeKey(r);
+  const g = id => (document.getElementById(id)||{}).value || '';
+  const err = document.getElementById('ni-error');
+  const dateISO = g('ni-date');
+  if (!dateISO) { err.textContent = 'Date is required.'; err.style.display = 'inline'; return; }
+  const amt = parseFloat(String(g('ni-amount')).replace(/[$,]/g,'')) || 0;
+  const invType = g('ni-type');
+  const billTo = g('ni-billto');
+  const site = (window._niSites && window._niSites[parseInt(g('ni-site'),10)]) || null;
+  const notes = g('ni-notes');
+  const po = g('ni-po');
+  const services = Array.from(document.querySelectorAll('#ni-services input:checked')).map(c => c.value);
+  const siteLabel = site ? site.label : '';
+  const siteFull  = site ? [site.siteAddr, site.csz].filter(Boolean).join(', ') : '';
+  const mainDesc = notes.trim() || (invType + ' — ' + (r['Account Name'] || 'Service'));
+  const lineItems = [{ desc: mainDesc, qty:1, price: amt, site: siteLabel, siteAddr: site?site.siteAddr:'', siteCSZ: site?site.csz:'' }];
+  services.forEach(s => lineItems.push({ desc: (SVC_DESCRIPTIONS[s]||{short:s}).short, qty:1, price:0, site: siteLabel }));
+  if (!invoiceDB[key]) invoiceDB[key] = [];
+  invoiceDB[key].push({
+    invNum: g('ni-num').trim(),
+    date: isoToMDY(dateISO),
+    amount: amt,
+    period: invType,
+    due: g('ni-terms') || r['Payment Terms'] || 'Net 30 Days',
+    notes: notes,
+    billed: false,
+    manualAmount: true,
+    custom: true,
+    invType: invType,
+    po: po,
+    billToOverride: billTo,
+    siteOverride: siteFull,
+    services: services,
+    lineItems: lineItems
+  });
+  saveData();
+  closeNewInvoice();
+  renderTab();
+  renderList();
+  showNotice('✓ ' + invType + ' invoice added — ' + (r['Account Name'] || r['Customer Name'] || ''));
+}
+
 function showNotice(msg) {
   let n = document.getElementById('global-notice');
   if (!n) { n = document.createElement('div'); n.id='global-notice'; n.style.cssText='position:fixed;bottom:18px;right:18px;background:#155724;color:white;padding:9px 16px;border-radius:7px;font-size:0.82rem;font-weight:600;z-index:9999;box-shadow:0 2px 10px rgba(0,0,0,0.2)'; document.body.appendChild(n); }
@@ -1841,6 +1972,22 @@ function viewGroup(agr, groupKey) {
     _renderAgreementInvoice(agr, {invNum: g.invNum||'(not assigned)', invDate: g.date, invDue: g.due, invPeriod: g.period, notes: ''});
     return;
   }
+  // Custom-built invoice (T&M / One-Time / Additional Service) — render with its per-invoice overrides
+  if (g.sites.length === 1 && g.sites[0].inv && g.sites[0].inv.custom) {
+    const inv = g.sites[0].inv;
+    const tmp = selectedIdx; selectedIdx = DB.indexOf(r);
+    const lines = (inv.lineItems && inv.lineItems.length) ? inv.lineItems
+                 : [{desc: inv.notes || inv.invType || 'Service', qty:1, price: Number(inv.amount)||0}];
+    document.getElementById('invoice-doc').innerHTML = buildInvoiceHTML({
+      invNum: inv.invNum || '(not assigned)',
+      invDate: inv.date, invDue: inv.due, invPeriod: inv.invType || inv.period,
+      billTo: inv.billToOverride || [r['Customer Name'], r['Billing Address'], r['City State Zip']].filter(Boolean).join(', '),
+      notes: inv.notes, record: r, po: inv.po, siteOverride: inv.siteOverride, customLines: true
+    }, lines);
+    selectedIdx = tmp;
+    document.getElementById('invoice-preview').style.display = 'block';
+    return;
+  }
   let lineItems = g.sites.map(s => {
     const owner = DB.find(x => makeKey(x) === s.csKey) || {};
     const siteName = s.acctName || owner['Account Name'] || owner['Customer Name'] || '';
@@ -1980,7 +2127,7 @@ function renderInvoiceTab() {
         <span style="display:flex;gap:8px;align-items:center;">
           <span style="font-size:0.75rem;font-weight:400;color:var(--gray4)">Billed: <b style="color:var(--green)">${fmt(totalBilled)}</b> &nbsp;|&nbsp; Pending: <b style="color:var(--accent)">${fmt(totalPending)}</b></span>
           <button class="btn-sm" style="background:#1d4ed8;color:#fff;font-weight:600;" onclick="emailCheckedInvoices()">📧 Email Invoice${checkedCount>1?'s':''}${checkedCount>0?` (${checkedCount})`:''}</button>
-          <button class="btn-sm btn-sm-blue" onclick="addBlankInvoice()">+ Add Invoice</button>
+          <button class="btn-sm btn-sm-blue" onclick="openNewInvoice()">+ Add Invoice</button>
           <button class="btn-sm" style="background:var(--accent);color:var(--navy);font-weight:600;" onclick="openRenewal()">🔄 Renew Agreement</button>
         </span>
       </h3>
@@ -3484,7 +3631,7 @@ function buildInvoiceHTML(data, lines) {
 
   // Build service rows — use full services list unless truly custom multi-line items
   let serviceRows = '';
-  const isCustomLines = lines && lines.length > 1 ||
+  const isCustomLines = (data && data.customLines) || (lines && lines.length > 1) ||
     (lines && lines.length === 1 && lines[0].desc &&
      !lines[0].desc.toLowerCase().includes((r['Account Name']||'').toLowerCase().slice(0,15)) &&
      activeSvcs.length === 0);
@@ -3678,10 +3825,10 @@ function buildInvoiceHTML(data, lines) {
             </td>
           </tr>
         </table>
-        ${r['Site Address'] ? `
+        ${(data.siteOverride || r['Site Address']) ? `
         <div style="border:1px solid #3b82f6;background:#f0f7ff;padding:5px 8px;font-size:8pt;line-height:1.6;">
           <div style="font-weight:bold;font-size:7.5pt;color:#1d4ed8;margin-bottom:2px;">Service Location:</div>
-          ${[r['Site Address'], r['Site City State Zip']].filter(Boolean).map(l=>esc(l)).join('<br>')}
+          ${data.siteOverride ? esc(data.siteOverride) : [r['Site Address'], r['Site City State Zip']].filter(Boolean).map(l=>esc(l)).join('<br>')}
         </div>` : ''}
       </td>
       <td style="vertical-align:top;">
@@ -3690,7 +3837,7 @@ function buildInvoiceHTML(data, lines) {
           <table style="border-collapse:collapse;font-size:8.5pt;width:100%;">
             <tr><td style="font-weight:bold;color:#444;width:130px;">Agreement:</td><td>${r['Agreement#']||'—'}</td></tr>
             <tr><td style="font-weight:bold;color:#444;">SWO:</td><td>${esc(r['SWO#']||'—')}</td></tr>
-            <tr><td style="font-weight:bold;color:#444;">Customer PO:</td><td>${esc(r['Customer PO']&&r['Customer PO']!=='--'?r['Customer PO']:'—')}</td></tr>
+            <tr><td style="font-weight:bold;color:#444;">Customer PO:</td><td>${esc((data.po||r['Customer PO'])&&(data.po||r['Customer PO'])!=='--'?(data.po||r['Customer PO']):'—')}</td></tr>
             <tr><td style="font-weight:bold;color:#444;">Site Contact:</td><td>${esc(((r['Contact First Name']||'')+' '+(r['Contact Last Name']||'')).trim()||'—')}</td></tr>
             <tr><td style="font-weight:bold;color:#444;">CS Account #:</td><td>${esc(r['Central Station Account#']||'—')}</td></tr>
             <tr><td style="font-weight:bold;color:#444;">Effective Date:</td><td>${esc(r['Agreement Effective Date']||'—')}</td></tr>
@@ -4443,6 +4590,63 @@ init();
       <span id="na-error" style="color:#dc2626;font-size:0.8rem;margin-right:auto;display:none;"></span>
       <button onclick="closeNewAgreement()" style="padding:9px 18px;border:1.5px solid var(--gray3);border-radius:6px;background:#fff;font-size:0.85rem;cursor:pointer;">Cancel</button>
       <button onclick="saveNewAgreement()" style="padding:9px 22px;background:#22c55e;color:#fff;border:none;border-radius:6px;font-size:0.85rem;font-weight:700;cursor:pointer;">✓ Save Agreement</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Invoice (custom invoice builder) modal -->
+<div id="new-inv-overlay" onclick="if(event.target===this)closeNewInvoice()">
+  <div id="new-inv-modal">
+    <div class="modal-header">
+      <h2 id="ni-title">➕ New Invoice</h2>
+      <button onclick="closeNewInvoice()" style="background:none;border:none;color:#fff;font-size:1.3rem;cursor:pointer;line-height:1;">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section">
+        <h3>Invoice</h3>
+        <div class="modal-grid cols3">
+          <div class="fg"><label>Type</label>
+            <select id="ni-type">
+              <option>T&amp;M</option><option>One-Time</option><option>Additional Service</option>
+            </select>
+          </div>
+          <div class="fg"><label>Date</label><input id="ni-date" type="date"></div>
+          <div class="fg"><label>Invoice #</label><input id="ni-num" placeholder="Optional"></div>
+        </div>
+        <div class="modal-grid cols3" style="margin-top:10px;">
+          <div class="fg"><label>Amount</label><input id="ni-amount" placeholder="e.g. $850.00"></div>
+          <div class="fg"><label>Customer PO</label><input id="ni-po" placeholder="Optional"></div>
+          <div class="fg"><label>Payment Terms</label>
+            <select id="ni-terms">
+              <option>Net 30 Days</option><option>Net 45 Days</option><option>Net 60 Days</option><option>Due Upon Receipt</option><option>Net 15 Days</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-section">
+        <h3>Billing &amp; Location</h3>
+        <div class="modal-grid">
+          <div class="fg span2"><label>Bill To</label><select id="ni-billto"></select></div>
+        </div>
+        <div class="modal-grid" style="margin-top:10px;">
+          <div class="fg span2"><label>Service Location / Site</label><select id="ni-site"></select></div>
+        </div>
+      </div>
+      <div class="modal-section">
+        <h3>Description of Work</h3>
+        <div class="modal-grid full">
+          <div class="fg"><textarea id="ni-notes" rows="3" placeholder="Notes describing the service performed — appears on the invoice."></textarea></div>
+        </div>
+      </div>
+      <div class="modal-section">
+        <h3>Services Provided <span style="font-weight:400;font-size:0.78rem;color:#888">— based on system type; check those that apply</span></h3>
+        <div class="svc-checks" id="ni-services"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <span id="ni-error" style="color:#dc2626;font-size:0.8rem;margin-right:auto;display:none;"></span>
+      <button onclick="closeNewInvoice()" style="padding:9px 18px;border:1.5px solid var(--gray3);border-radius:6px;background:#fff;font-size:0.85rem;cursor:pointer;">Cancel</button>
+      <button onclick="saveNewInvoice()" style="padding:9px 22px;background:#22c55e;color:#fff;border:none;border-radius:6px;font-size:0.85rem;font-weight:700;cursor:pointer;">✓ Add Invoice</button>
     </div>
   </div>
 </div>
