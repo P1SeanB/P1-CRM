@@ -2317,7 +2317,7 @@ function addBlankInvoice() {
   invoiceDB[key].push({
     invNum:'', date: new Date().toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'numeric'}),
     amount: amt, period:'Monthly Service', due: r['Payment Terms']||'Net 30 Days',
-    notes:'', billed:false,
+    notes:'', billed:false, manualAmount:true,
     lineItems:[{desc: r['Account Name']||'Service', qty:1, price:amt}]
   });
   saveData(); renderTab(); renderList();
@@ -4101,8 +4101,11 @@ function accountHasCustomSchedule(r){
 }
 // A future invoice the schedule owns and may rebuild: unbilled, no invoice #
 // entered, and created by an auto generator.
+// A future invoice the schedule owns and may rebuild: unbilled, no invoice #
+// entered, and not a manual one-off override. (Flag-independent — existing
+// cloud invoices weren't all tagged, so we key off these durable signals.)
 function _isRebuildable(inv){
-  return !inv.billed && !(inv.invNum||'').toString().trim() && !inv.manualAmount && (inv.freqSeed||inv.customSeed||inv.renewal);
+  return !inv.billed && !(inv.invNum||'').toString().trim() && !inv.manualAmount;
 }
 function _futureScheduleCount(idx){
   const key = makeKey(DB[idx]);
@@ -4214,7 +4217,7 @@ function changeBillingCharge(idx, val){
   if(RECURRING_INTERVAL[(r['Billing Frequency']||'').trim()] && amt>0){
     const key = makeKey(r); let n=0;
     (invoiceDB[key]||[]).forEach(inv=>{
-      if(inv.freqSeed && !inv.billed && !inv.manualAmount){
+      if(!inv.billed && !(inv.invNum||'').toString().trim() && !inv.manualAmount){
         inv.amount = amt;
         if(Array.isArray(inv.lineItems) && inv.lineItems.length) inv.lineItems[0].price = amt;
         else inv.lineItems=[{desc:r['Account Name']||'Service',qty:1,price:amt}];
