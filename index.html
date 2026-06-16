@@ -2682,6 +2682,21 @@ function exportCSV() {
   XLSX.utils.book_append_sheet(wb, ws(apH, DB.map(r=>apH.map(f=>v(r,f))),
     [12,20,28,45,20,16,24,24,16,20,20,30,16,20,30]), 'Accounts Payable');
 
+  // Sheet 6b — Systems & Communication
+  const sysH = ['Agreement#','Customer Name','Account Name','Site','System Type','Manufacturer','Model','Comm Paths'];
+  const sysRows = [];
+  const _seenAgr = {};
+  DB.forEach(r => {
+    const agr = String(r['Agreement#']);
+    if (_seenAgr[agr]) return; _seenAgr[agr] = 1;
+    const canon = sysCanonical(agr) || r;
+    (Array.isArray(canon['Systems'])?canon['Systems']:[]).forEach(sys => {
+      sysRows.push([v(r,'Agreement#'), v(r,'Customer Name'), v(r,'Account Name'),
+        sys.site||'', sys.sysType||'', sys.mfr||'', sys.model||'', (sys.paths||[]).join(', ')]);
+    });
+  });
+  XLSX.utils.book_append_sheet(wb, ws(sysH, sysRows, [12,28,45,40,14,20,20,24]), 'Systems');
+
   // Sheet 7 — Invoice Log
   const iH = ['Agreement#','Central Station Account#','Account Name','Customer Name',
                'Invoice#','Date','Amount','Period','Due/Terms','Billed','Notes'];
@@ -3896,16 +3911,149 @@ function renderDetailTab() {
       </div>
     </div>
     ${r['Other Billing Notes']?`<div class="services-card" style="background:#fffbeb;border-color:#e8a020"><h3>Billing Notes</h3><p style="font-size:0.82rem;line-height:1.6;">${esc(r['Other Billing Notes'])}</p></div>`:''}
-    <div style="text-align:right;margin-top:8px;">
+    ${systemsCardHTML(r['Agreement#'])}
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+      <button class="btn btn-outline" style="border-color:#dc2626;color:#dc2626;" onclick="deleteAgreement()">🗑 Delete Agreement</button>
       <button class="btn btn-outline" onclick="saveData()">💾 Save Changes</button>
     </div>
   `;
+}
+
+// Permanently delete an agreement (all its sites + invoices), gated by your
+// Supabase login password. The password is verified against Supabase — it is
+// NOT stored anywhere in this file (the page is public).
+async function deleteAgreement() {
+  if (selectedIdx === null) return;
+  const rec = DB[selectedIdx];
+  const agr = rec['Agreement#'];
+  const siteRecs = DB.filter(r => String(r['Agreement#']) === String(agr));
+  const keys = [...new Set(siteRecs.map(r => makeKey(r)))];
+  const invCount = keys.reduce((n,k) => n + ((invoiceDB[k]||[]).length), 0);
+  const name = (AGR_META[String(agr)]||{}).h || rec['Account Name'] || rec['Customer Name'] || ('Agreement #'+agr);
+
+  if (!confirm(`Permanently DELETE Agreement #${agr} — ${name}?\n\nThis removes ${siteRecs.length} site record(s) and ${invCount} invoice(s).\n\nThis CANNOT be undone.`)) return;
+
+  const pass = prompt('Enter your login password to confirm deletion:');
+  if (!pass) return;
+
+  let email = '';
+  try { const { data:{ user } } = await sb.auth.getUser(); email = user && user.email; } catch(e){}
+  if (!email) { alert('Could not verify your session. Reload, sign in, and try again.'); return; }
+  const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if (error) { alert('Incorrect password — the agreement was NOT deleted.'); return; }
+
+  DB = DB.filter(r => String(r['Agreement#']) !== String(agr));
+  keys.forEach(k => { delete invoiceDB[k]; });
+  selectedIdx = null;
+
+  saveData();
+  renderList();
+  const dv = document.getElementById('detail-view');
+  if (dv) { dv.style.display = 'none'; dv.innerHTML = ''; }
+  const es = document.querySelector('.empty-state'); if (es) es.style.display = '';
+  showNotice(`✓ Agreement #${agr} deleted`);
 }
 
 function updateField(idx, field, val) {
   DB[idx][field] = val;
   saveData();
   renderList();
+}
+
+// ── Systems & Communication card ───────────────────────────────────────────
+// Stored as an array on the agreement's canonical (first/holding) record under
+// 'Systems'. Each entry: { site, sysType, mfr, model, paths:[POTS/NETWORK/CELLULAR] }.
+// Rides along in the record JSON, so Supabase needs no schema change.
+const COMM_PATHS = ['POTS','NETWORK','CELLULAR'];
+const SYS_TYPES  = ['Fire','Burglar','Access','A/V','Two-Way','Camera/CCTV','Intercom','Other'];
+
+function sysSites(agr){ return DB.filter(r => String(r['Agreement#'])===String(agr)); }
+function sysSiteLabel(rec, n){
+  const a = String(rec['Site Address']||'').trim();
+  const c = String(rec['Site City State Zip']||'').trim();
+  if (a) return a + (c?(', '+c):'');
+  return 'Site '+n;
+}
+// The record that holds the Systems array (whichever has it; else the first site).
+function sysCanonical(agr){
+  const sites = sysSites(agr);
+  return sites.find(r => Array.isArray(r['Systems']) && r['Systems'].length)
+      || sites.find(r => Array.isArray(r['Systems']))
+      || sites[0];
+}
+function sysEnsure(agr){
+  const c = sysCanonical(agr);
+  if (!c) return null;
+  if (!Array.isArray(c['Systems'])) c['Systems'] = [];
+  return c;
+}
+function sysRefresh(agr){
+  const el = document.getElementById('sys-card-body');
+  if (el) el.innerHTML = systemsBodyHTML(agr);
+}
+function systemsCardHTML(agr){
+  return `<div class="services-card" style="background:#f0f7ff;border-color:#1d4ed8;">
+    <h3>🛰 Systems &amp; Communication</h3>
+    <div id="sys-card-body">${systemsBodyHTML(agr)}</div>
+    <div style="margin-top:10px;">
+      <button class="btn-sm" style="background:#1d4ed8;color:#fff;font-weight:600;" onclick="sysAdd('${esc(String(agr))}')">＋ Add System</button>
+    </div>
+  </div>`;
+}
+function systemsBodyHTML(agr){
+  const canon = sysCanonical(agr);
+  if (!canon) return '';
+  const systems = Array.isArray(canon['Systems']) ? canon['Systems'] : [];
+  const siteOpts = sysSites(agr).map((s,i)=> sysSiteLabel(s, i+1));
+  if (!systems.length) {
+    return `<p style="font-size:0.82rem;color:#666;">No systems recorded yet. Click "Add System" to enter a manufacturer, model, and communication path for a site.</p>`;
+  }
+  return systems.map((sys,i)=>{
+    const paths = Array.isArray(sys.paths)?sys.paths:[];
+    const siteSel = siteOpts.map(o=>`<option ${o===sys.site?'selected':''}>${esc(o)}</option>`).join('');
+    const typeSel = SYS_TYPES.map(t=>`<option ${t===sys.sysType?'selected':''}>${esc(t)}</option>`).join('');
+    const pathChecks = COMM_PATHS.map(p=>`<label style="margin-right:16px;font-size:0.82rem;white-space:nowrap;"><input type="checkbox" ${paths.includes(p)?'checked':''} onchange="sysTogglePath('${esc(String(agr))}',${i},'${p}',this.checked)"> ${p}</label>`).join('');
+    return `<div style="border:1px solid #cbd9ef;border-radius:8px;padding:12px;margin-bottom:10px;background:#fff;position:relative;">
+      <button title="Remove system" onclick="sysRemove('${esc(String(agr))}',${i})" style="position:absolute;top:8px;right:10px;background:none;border:none;color:#dc2626;font-size:1rem;cursor:pointer;line-height:1;">✕</button>
+      <div class="modal-grid" style="margin-bottom:8px;">
+        <div class="fg"><label style="font-size:0.75rem;">Site</label>
+          <select onchange="sysSetField('${esc(String(agr))}',${i},'site',this.value)">${siteSel}</select></div>
+        <div class="fg"><label style="font-size:0.75rem;">System Type</label>
+          <select onchange="sysSetField('${esc(String(agr))}',${i},'sysType',this.value)">${typeSel}</select></div>
+      </div>
+      <div class="modal-grid" style="margin-bottom:8px;">
+        <div class="fg"><label style="font-size:0.75rem;">Manufacturer</label>
+          <input value="${esc(sys.mfr||'')}" placeholder="e.g. Honeywell" oninput="sysSetField('${esc(String(agr))}',${i},'mfr',this.value)"></div>
+        <div class="fg"><label style="font-size:0.75rem;">Model</label>
+          <input value="${esc(sys.model||'')}" placeholder="e.g. Vista 128" oninput="sysSetField('${esc(String(agr))}',${i},'model',this.value)"></div>
+      </div>
+      <div><label style="font-size:0.75rem;display:block;margin-bottom:5px;">Path(s) of Communication</label>${pathChecks}</div>
+    </div>`;
+  }).join('');
+}
+function sysAdd(agr){
+  const c = sysEnsure(agr); if(!c) return;
+  const sites = sysSites(agr);
+  c['Systems'].push({ site: sites.length?sysSiteLabel(sites[0],1):'', sysType:'Fire', mfr:'', model:'', paths:[] });
+  saveData(); sysRefresh(agr);
+}
+function sysRemove(agr,i){
+  const c = sysEnsure(agr); if(!c) return;
+  c['Systems'].splice(i,1);
+  saveData(); sysRefresh(agr);
+}
+function sysSetField(agr,i,field,val){
+  const c = sysEnsure(agr); if(!c||!c['Systems'][i]) return;
+  c['Systems'][i][field] = val;
+  saveData(); // no re-render → keeps text focus
+}
+function sysTogglePath(agr,i,path,checked){
+  const c = sysEnsure(agr); if(!c||!c['Systems'][i]) return;
+  const arr = c['Systems'][i].paths || (c['Systems'][i].paths=[]);
+  const pos = arr.indexOf(path);
+  if (checked && pos<0) arr.push(path);
+  if (!checked && pos>=0) arr.splice(pos,1);
+  saveData();
 }
 
 // ── A/P multi-email helpers ────────────────────────────────────────────────
