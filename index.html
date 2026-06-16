@@ -530,6 +530,7 @@ let selectedIdx = null;
 let lineItems = [];
 let activeTab = 'invoices';
 let renewalCustomRows = [];
+let servicesEditMode = false;   // Services Included card: locked (false) vs editable (true)
 
 const SERVICES = [
   'Central Station Monitoring','Alarm.com Services','ConnectOne Services',
@@ -1543,6 +1544,7 @@ function selectAccount(idx) {
   multiEmailPayload = null;
   emailChecked.clear();
   invoiceHistoryExpanded = false;
+  servicesEditMode = false;
   renderList();
   renderDetail(DB[idx]);
 }
@@ -2447,11 +2449,26 @@ function renderDetailTab() {
     </div>
 
     <div class="services-card">
-      <h3>Services Included</h3>
+      <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <span>Services Included${servicesEditMode?' <span style="color:var(--blue);font-weight:600;text-transform:none;letter-spacing:0;font-size:0.7rem;">— click a service to include / exclude</span>':''}</span>
+        <button onclick="toggleServicesEdit()" title="${servicesEditMode?'Lock the list':'Unlock to edit which services are included'}"
+          style="border:1.5px solid ${servicesEditMode?'var(--green)':'var(--blue)'};background:${servicesEditMode?'#e9f7ef':'#f0f7ff'};color:${servicesEditMode?'var(--green)':'var(--blue)'};border-radius:6px;cursor:pointer;font-size:0.72rem;font-weight:700;padding:3px 10px;white-space:nowrap;text-transform:none;letter-spacing:0;">
+          ${servicesEditMode?'🔓 Done':'🔒 Edit'}
+        </button>
+      </h3>
       <div class="services-grid">
-        ${activeSvcs.map(s=>`<span class="svc-tag svc-yes">✓ ${s}</span>`).join('')}
-        ${inactiveSvcs.map(s=>`<span class="svc-tag svc-no">${s}</span>`).join('')}
+        ${SERVICES_LIST.map((s,i)=>{
+          const on = r[s]==='YES';
+          if(servicesEditMode){
+            return `<span class="svc-tag ${on?'svc-yes':'svc-no'}" onclick="toggleService(${i})"
+              title="Click to ${on?'remove':'add'}"
+              style="cursor:pointer;${on?'':'text-decoration:none;opacity:0.7;'}user-select:none;">${on?'✓ ':'＋ '}${esc(s)}</span>`;
+          }
+          return on ? `<span class="svc-tag svc-yes">✓ ${esc(s)}</span>`
+                    : `<span class="svc-tag svc-no">${esc(s)}</span>`;
+        }).join('')}
       </div>
+      ${servicesEditMode?`<div style="font-size:0.72rem;color:var(--gray4);margin-top:9px;line-height:1.5;">Included services appear on this account's invoices when they're generated, so future / unbilled invoices pick up the change automatically. Click <b>Done</b> to lock the list.</div>`:''}
     </div>
     ${r['Other Billing Notes']?`<div class="services-card" style="background:#fffbeb;border-color:#e8a020"><h3>Billing Notes</h3><p style="font-size:0.82rem;line-height:1.6;">${esc(r['Other Billing Notes'])}</p></div>`:''}
     ${systemsCardHTML(r['Agreement#'])}
@@ -2501,6 +2518,24 @@ function updateField(idx, field, val) {
   DB[idx][field] = val;
   saveData();
   renderList();
+}
+
+// ── Services Included: lock/unlock the list and toggle individual services ──
+// Services are stored on the record as r[serviceName] === 'YES'. Invoices read
+// them live via getActiveServices(), so toggling here flows straight onto any
+// invoice when it's generated (future / unbilled included).
+function toggleServicesEdit(){
+  servicesEditMode = !servicesEditMode;
+  if(selectedIdx!==null) renderDetail(DB[selectedIdx]);
+}
+function toggleService(svcIndex){
+  if(selectedIdx===null) return;
+  const r = DB[selectedIdx];
+  const svc = SERVICES_LIST[svcIndex];
+  if(!svc) return;
+  r[svc] = (r[svc]==='YES') ? '' : 'YES';
+  saveData();
+  renderDetail(r);
 }
 
 // ── Systems & Communication card ───────────────────────────────────────────
