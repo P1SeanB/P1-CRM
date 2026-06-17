@@ -564,6 +564,7 @@ let activeTab = 'invoices';
 let renewalCustomRows = [];
 let servicesEditMode = false;   // Services Included card: locked (false) vs editable (true)
 let detailsLocked = true;       // Account Details top panels: locked (read-only) vs unlocked (editable)
+let apLocked = true;            // Accounts Payable / Invoice Delivery panel: locked vs unlocked
 let unlockedInvoiceGroups = new Set();   // groupKeys (agr::groupKey) unlocked for one-off amount editing
 
 const SERVICES = [
@@ -3987,22 +3988,31 @@ function renderDetailTab() {
   const lkSel= LK ? 'disabled' : '';                       // <select> elements
   const lkTitle = LK ? 'Locked — click Unlock to edit' : 'Click to edit';
 
-  function editField(field, label, val, lockable=true) {
-    const ro = (LK && lockable) ? 'readonly tabindex="-1"' : '';
+  // Independent lock state for the Accounts Payable / Invoice Delivery panel.
+  const AP   = apLocked;
+  const apIn = AP ? 'readonly tabindex="-1"' : '';
+  const apSel= AP ? 'disabled' : '';
+  const apTitle = AP ? 'Locked — click Unlock to edit' : 'Click to edit';
+
+  // editField lockMode: 'details' (top panels), 'ap' (A/P panel), or 'none'.
+  function editField(field, label, val, lockMode='details') {
+    const isLocked = lockMode==='details' ? LK : (lockMode==='ap' ? AP : false);
+    const ro  = isLocked ? 'readonly tabindex="-1"' : '';
+    const ttl = isLocked ? 'Locked — click Unlock to edit' : 'Click to edit';
     return `<div class="info-row">
       <span class="info-label">${label}</span>
-      <input class="editable-field" value="${esc(val||'')}" ${ro} onchange="updateField(${idx},'${field}',this.value)" title="${(LK&&lockable)?lkTitle:'Click to edit'}">
+      <input class="editable-field" value="${esc(val||'')}" ${ro} onchange="updateField(${idx},'${field}',this.value)" title="${ttl}">
     </div>`;
   }
 
-  // Multi-line text field for longer notes (delivery instructions, payment notes, etc.)
+  // Multi-line text field for longer notes (A/P delivery / payment notes) — honors A/P lock.
   function textareaField(field, label, val) {
     return `<div class="info-row" style="display:block;">
       <span class="info-label" style="display:block;margin-bottom:3px;">${label}</span>
-      <textarea class="editable-field" rows="4"
+      <textarea class="editable-field" rows="4" ${apIn}
         style="width:100%;box-sizing:border-box;text-align:left;resize:vertical;min-height:60px;font-family:inherit;line-height:1.35;"
         onchange="updateField(${idx},'${field}',this.value)"
-        title="Click to edit" placeholder="Add notes…">${esc(val||'')}</textarea>
+        title="${apTitle}" placeholder="Add notes…">${esc(val||'')}</textarea>
     </div>`;
   }
 
@@ -4019,8 +4029,8 @@ function renderDetailTab() {
     const count = emails.filter(Boolean).length;
     const rows = emails.map((em,i)=>`
       <div class="info-row" style="align-items:center;gap:6px;">
-        <input class="editable-field" style="flex:1;text-align:left;" value="${esc(em)}" data-apemail="${field}"
-          onchange="apEmailEdit(${idx},'${field}',${i},this.value)" title="Click to edit"
+        <input class="editable-field" style="flex:1;text-align:left;" value="${esc(em)}" data-apemail="${field}" ${apIn}
+          onchange="apEmailEdit(${idx},'${field}',${i},this.value)" title="${apTitle}"
           placeholder="name@customer.com">
         <button type="button" title="Remove this email"
           onclick="apEmailRemove(${idx},'${field}',${i})"
@@ -4116,33 +4126,42 @@ function renderDetailTab() {
 
     <!-- A/P Section -->
     <div class="services-card" style="border-color:#3b82f6;background:#f0f7ff;">
-      <h3 style="color:#1d4ed8;">📬 Accounts Payable / Invoice Delivery <span style="font-size:0.66rem;color:var(--blue);font-weight:400;font-style:italic">(click to edit)</span></h3>
-      <div class="cards-row" style="margin-top:8px;">
+      <h3 style="color:#1d4ed8;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <span>📬 Accounts Payable / Invoice Delivery
+          <span style="font-size:0.66rem;color:${AP?'var(--gray4)':'var(--blue)'};font-weight:400;font-style:italic">${AP?'(locked)':'(click to edit)'}</span>
+        </span>
+        <button class="details-lock-btn" onclick="toggleApLock()"
+          title="${AP?'Unlock the A/P panel for editing':'Lock the A/P panel'}"
+          style="text-transform:none;letter-spacing:0;border:1.5px solid ${AP?'var(--blue)':'var(--green)'};background:${AP?'#f0f7ff':'#e9f7ef'};color:${AP?'var(--blue)':'var(--green)'};">
+          ${AP?'🔒 Unlock to Edit':'🔓 Lock'}
+        </button>
+      </h3>
+      <div class="cards-row${AP?' locked':''}" style="margin-top:8px;">
         <div class="info-card" style="flex:1.2;">
           <h3 style="font-size:0.78rem;color:#555;text-transform:uppercase;letter-spacing:.04em;">A/P Contact</h3>
-          ${editField('AP Contact Name','Name',r['AP Contact Name'],false)}
-          ${editField('AP Contact Title','Title',r['AP Contact Title'],false)}
+          ${editField('AP Contact Name','Name',r['AP Contact Name'],'ap')}
+          ${editField('AP Contact Title','Title',r['AP Contact Title'],'ap')}
           ${multiEmailField('AP Contact Email','Email(s)',r['AP Contact Email'])}
           ${multiEmailField('AP Contact CC','CC Email(s)',r['AP Contact CC'])}
-          ${editField('AP Contact Phone','Phone',r['AP Contact Phone'],false)}
+          ${editField('AP Contact Phone','Phone',r['AP Contact Phone'],'ap')}
         </div>
         <div class="info-card" style="flex:1.2;">
           <h3 style="font-size:0.78rem;color:#555;text-transform:uppercase;letter-spacing:.04em;">Invoice Delivery Method</h3>
           <div class="info-row" style="align-items:center;gap:6px;">
             <span class="info-label">Method</span>
-            <select class="editable-field" style="flex:1;" onchange="updateField(${idx},'AP Delivery Method',this.value)">
+            <select class="editable-field" style="flex:1;" ${apSel} onchange="updateField(${idx},'AP Delivery Method',this.value)">
               ${['','Email to A/P Contact','Submit via A/P Portal','Mail (physical)','Email to Billing Address','Other'].map(opt=>`<option value="${opt}" ${(r['AP Delivery Method']||'')==opt?'selected':''}>${opt||'— select —'}</option>`).join('')}
             </select>
           </div>
-          ${editField('AP Portal Name','Portal Name',r['AP Portal Name'],false)}
-          ${editField('AP Portal URL','Portal URL',r['AP Portal URL'],false)}
+          ${editField('AP Portal Name','Portal Name',r['AP Portal Name'],'ap')}
+          ${editField('AP Portal URL','Portal URL',r['AP Portal URL'],'ap')}
           ${textareaField('AP Delivery Notes','Delivery Notes',r['AP Delivery Notes'])}
         </div>
         <div class="info-card" style="flex:1.2;">
           <h3 style="font-size:0.78rem;color:#555;text-transform:uppercase;letter-spacing:.04em;">Payment Method</h3>
           <div class="info-row" style="align-items:center;gap:6px;">
             <span class="info-label">Method</span>
-            <select class="editable-field" style="flex:1;" onchange="updateField(${idx},'AP Payment Method',this.value)">
+            <select class="editable-field" style="flex:1;" ${apSel} onchange="updateField(${idx},'AP Payment Method',this.value)">
               ${['','Check by Mail','ACH / EFT','Credit Card','Online Portal','Other'].map(opt=>`<option value="${opt}" ${(r['AP Payment Method']||'')==opt?'selected':''}>${opt||'— select —'}</option>`).join('')}
             </select>
           </div>
@@ -4233,6 +4252,10 @@ function toggleServicesEdit(){
 }
 function toggleDetailsLock(){
   detailsLocked = !detailsLocked;
+  if(selectedIdx!==null) renderDetail(DB[selectedIdx]);
+}
+function toggleApLock(){
+  apLocked = !apLocked;
   if(selectedIdx!==null) renderDetail(DB[selectedIdx]);
 }
 function toggleService(svcIndex){
