@@ -562,9 +562,8 @@ let selectedIdx = null;
 let lineItems = [];
 let activeTab = 'invoices';
 let renewalCustomRows = [];
-let servicesEditMode = false;   // Services Included card: locked (false) vs editable (true)
 let detailsLocked = true;       // Account Details top panels: locked (read-only) vs unlocked (editable)
-let apLocked = true;            // Accounts Payable / Invoice Delivery panel: locked vs unlocked
+let apLocked = true;            // Master lock for lower section: A/P, Services Included, Billing Notes
 let unlockedInvoiceGroups = new Set();   // groupKeys (agr::groupKey) unlocked for one-off amount editing
 
 const SERVICES = [
@@ -3164,7 +3163,6 @@ function selectAccount(idx) {
   multiEmailPayload = null;
   emailChecked.clear();
   invoiceHistoryExpanded = false;
-  servicesEditMode = false;
   unlockedInvoiceGroups.clear();
   renderList();
   renderDetail(DB[idx]);
@@ -4128,10 +4126,10 @@ function renderDetailTab() {
     <div class="services-card" style="border-color:#3b82f6;background:#f0f7ff;">
       <h3 style="color:#1d4ed8;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <span>📬 Accounts Payable / Invoice Delivery
-          <span style="font-size:0.66rem;color:${AP?'var(--gray4)':'var(--blue)'};font-weight:400;font-style:italic">${AP?'(locked)':'(click to edit)'}</span>
+          <span style="font-size:0.66rem;color:${AP?'var(--gray4)':'var(--blue)'};font-weight:400;font-style:italic">${AP?'(locked)':'(editing — also unlocks Services & Billing Notes)'}</span>
         </span>
         <button class="details-lock-btn" onclick="toggleApLock()"
-          title="${AP?'Unlock the A/P panel for editing':'Lock the A/P panel'}"
+          title="${AP?'Unlock A/P, Services Included, and Billing Notes for editing':'Lock A/P, Services Included, and Billing Notes'}"
           style="text-transform:none;letter-spacing:0;border:1.5px solid ${AP?'var(--blue)':'var(--green)'};background:${AP?'#f0f7ff':'#e9f7ef'};color:${AP?'var(--blue)':'var(--green)'};">
           ${AP?'🔒 Unlock to Edit':'🔓 Lock'}
         </button>
@@ -4172,16 +4170,13 @@ function renderDetailTab() {
 
     <div class="services-card">
       <h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <span>Services Included${servicesEditMode?' <span style="color:var(--blue);font-weight:600;text-transform:none;letter-spacing:0;font-size:0.7rem;">— click a service to include / exclude</span>':''}</span>
-        <button onclick="toggleServicesEdit()" title="${servicesEditMode?'Lock the list':'Unlock to edit which services are included'}"
-          style="border:1.5px solid ${servicesEditMode?'var(--green)':'var(--blue)'};background:${servicesEditMode?'#e9f7ef':'#f0f7ff'};color:${servicesEditMode?'var(--green)':'var(--blue)'};border-radius:6px;cursor:pointer;font-size:0.72rem;font-weight:700;padding:3px 10px;white-space:nowrap;text-transform:none;letter-spacing:0;">
-          ${servicesEditMode?'🔓 Done':'🔒 Edit'}
-        </button>
+        <span>Services Included${!AP?' <span style="color:var(--blue);font-weight:600;text-transform:none;letter-spacing:0;font-size:0.7rem;">— click a service to include / exclude</span>':''}</span>
+        ${AP?'<span style="font-size:0.66rem;color:var(--gray4);font-weight:400;font-style:italic;text-transform:none;letter-spacing:0;">🔒 unlock the A/P panel above to edit</span>':''}
       </h3>
       <div class="services-grid">
         ${SERVICES_LIST.map((s,i)=>{
           const on = r[s]==='YES';
-          if(servicesEditMode){
+          if(!AP){
             return `<span class="svc-tag ${on?'svc-yes':'svc-no'}" onclick="toggleService(${i})"
               title="Click to ${on?'remove':'add'}"
               style="cursor:pointer;${on?'':'text-decoration:none;opacity:0.7;'}user-select:none;">${on?'✓ ':'＋ '}${esc(s)}</span>`;
@@ -4190,9 +4185,23 @@ function renderDetailTab() {
                     : `<span class="svc-tag svc-no">${esc(s)}</span>`;
         }).join('')}
       </div>
-      ${servicesEditMode?`<div style="font-size:0.72rem;color:var(--gray4);margin-top:9px;line-height:1.5;">Included services appear on this account's invoices when they're generated, so future / unbilled invoices pick up the change automatically. Click <b>Done</b> to lock the list.</div>`:''}
+      ${!AP?`<div style="font-size:0.72rem;color:var(--gray4);margin-top:9px;line-height:1.5;">Included services appear on this account's invoices when they're generated, so future / unbilled invoices pick up the change automatically.</div>`:''}
     </div>
-    ${r['Other Billing Notes']?`<div class="services-card" style="background:#fffbeb;border-color:#e8a020"><h3>Billing Notes</h3><p style="font-size:0.82rem;line-height:1.6;">${esc(r['Other Billing Notes'])}</p></div>`:''}
+    ${(function(){
+      const notes = r['Other Billing Notes'] || '';
+      if(AP){
+        // Locked: show notes read-only only when they exist (no empty clutter)
+        return notes ? `<div class="services-card" style="background:#fffbeb;border-color:#e8a020"><h3>Billing Notes</h3><p style="font-size:0.82rem;line-height:1.6;">${esc(notes)}</p></div>` : '';
+      }
+      // Unlocked: editable textarea (always shown so notes can be added to any account)
+      return `<div class="services-card" style="background:#fffbeb;border-color:#e8a020">
+        <h3>Billing Notes <span style="font-size:0.66rem;color:var(--blue);font-weight:400;font-style:italic;text-transform:none;letter-spacing:0;">(editable)</span></h3>
+        <textarea rows="3"
+          style="width:100%;box-sizing:border-box;text-align:left;resize:vertical;min-height:52px;font-family:inherit;line-height:1.55;font-size:0.82rem;border:1px solid #e8d9a0;border-radius:6px;padding:7px 9px;background:#fffef8;color:var(--text);outline:none;"
+          onchange="updateField(${idx},'Other Billing Notes',this.value)"
+          placeholder="Add billing notes…">${esc(notes)}</textarea>
+      </div>`;
+    })()}
     ${systemsCardHTML(r['Agreement#'])}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
       <button class="btn btn-outline" style="border-color:#dc2626;color:#dc2626;" onclick="deleteAgreement()">🗑 Delete Agreement</button>
@@ -4242,14 +4251,10 @@ function updateField(idx, field, val) {
   renderList();
 }
 
-// ── Services Included: lock/unlock the list and toggle individual services ──
+// ── Services Included: edit-mode now follows the A/P lock (apLocked). ──
 // Services are stored on the record as r[serviceName] === 'YES'. Invoices read
 // them live via getActiveServices(), so toggling here flows straight onto any
 // invoice when it's generated (future / unbilled included).
-function toggleServicesEdit(){
-  servicesEditMode = !servicesEditMode;
-  if(selectedIdx!==null) renderDetail(DB[selectedIdx]);
-}
 function toggleDetailsLock(){
   detailsLocked = !detailsLocked;
   if(selectedIdx!==null) renderDetail(DB[selectedIdx]);
