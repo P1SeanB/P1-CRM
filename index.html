@@ -173,6 +173,24 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--gray1);
 #new-inv-modal .svc-checks { display:grid; grid-template-columns:1fr 1fr; gap:6px 16px; margin-top:4px; }
 #new-inv-modal .svc-checks label { text-transform:none; letter-spacing:0; font-size:0.8rem; font-weight:400; display:flex; align-items:center; gap:6px; cursor:pointer; }
 
+#batch-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1000; overflow-y:auto; padding:30px 16px; }
+#batch-modal { background:#fff; border-radius:10px; max-width:940px; margin:0 auto; box-shadow:0 8px 40px rgba(0,0,0,0.25); overflow:hidden; }
+#batch-modal .modal-header { background:var(--navy); color:#fff; padding:16px 22px; display:flex; justify-content:space-between; align-items:center; }
+#batch-modal .modal-header h2 { font-size:1rem; font-weight:700; margin:0; }
+#batch-modal .modal-body { padding:16px 22px; max-height:62vh; overflow-y:auto; }
+#batch-modal .modal-footer { padding:14px 22px; background:#f8f9fa; border-top:1px solid var(--gray2); display:flex; justify-content:flex-end; gap:10px; align-items:center; }
+#batch-modal table.bb { width:100%; border-collapse:collapse; font-size:0.8rem; }
+#batch-modal table.bb th { text-align:left; padding:7px 8px; border-bottom:2px solid var(--gray2); color:var(--gray4); font-size:0.68rem; text-transform:uppercase; letter-spacing:.05em; position:sticky; top:0; background:#fff; }
+#batch-modal table.bb td { padding:6px 8px; border-bottom:1px solid var(--gray1); vertical-align:middle; }
+#batch-modal .bb-badge { display:inline-block; padding:2px 8px; border-radius:11px; font-size:0.7rem; font-weight:700; white-space:nowrap; }
+#batch-modal .bb-ready { background:#e9f7ef; color:#157347; }
+#batch-modal .bb-warn  { background:#fff3cd; color:#856404; }
+#batch-modal .bb-info  { background:#e7f1ff; color:#1d4ed8; }
+#batch-modal .bb-skip  { background:#f1f3f5; color:#868e96; }
+#batch-modal .bb-err   { background:#fde2e1; color:#c92a2a; }
+#batch-modal .bb-summary { font-size:0.82rem; color:var(--gray4); margin-bottom:12px; display:flex; gap:14px; flex-wrap:wrap; }
+#batch-modal .bb-summary b { color:var(--navy); }
+
 #app { display: flex; height: calc(100vh - 63px); }
 #sidebar { width: 340px; min-width: 280px; background: var(--white); border-right: 1px solid var(--gray3); display: flex; flex-direction: column; overflow: hidden; }
 #main { flex: 1; overflow-y: auto; background: var(--gray1); }
@@ -404,7 +422,9 @@ table.inv-list tr.unbilled:hover td { background: #fff5d6; }
     <button class="hbtn hbtn-outline" onclick="saveData()">💾 Save</button>
     <button class="hbtn hbtn-outline" onclick="loadFromFile()">📂 Load</button>
     <button class="hbtn hbtn-outline" onclick="refreshFromCloud()" title="Pull the latest data from the cloud">🔄 Refresh from Cloud</button>
+    <button class="hbtn hbtn-outline" onclick="openBatchImport()" title="Import a batch billing file: stamp invoice #s onto the matching scheduled invoices and mark them billed">📥 Import Billing</button>
     <input type="file" id="load-file" accept=".json,.xlsx" style="display:none" onchange="handleFileLoad(event)">
+    <input type="file" id="batch-file" accept=".xlsx" style="display:none" onchange="handleBatchBillingFile(event)">
   </div>
   <div class="header-stats">
     <div class="hstat"><div class="hstat-val" id="stat-active">—</div><div class="hstat-lbl">Active</div></div>
@@ -6207,6 +6227,256 @@ init();
     </div>
   </div>
 </div>
+
+<!-- ═══════════ Batch Billing Import ═══════════ -->
+<div id="batch-overlay" onclick="if(event.target===this)closeBatchImport()">
+  <div id="batch-modal">
+    <div class="modal-header">
+      <h2>📥 Import Batch Billing</h2>
+      <button onclick="closeBatchImport()" style="background:none;border:none;color:#fff;font-size:1.3rem;cursor:pointer;line-height:1;">✕</button>
+    </div>
+    <div class="modal-body" id="batch-body"></div>
+    <div class="modal-footer">
+      <span id="bb-error" style="color:#dc2626;font-size:0.8rem;margin-right:auto;display:none;"></span>
+      <button onclick="closeBatchImport()" style="padding:9px 18px;border:1.5px solid var(--gray3);border-radius:6px;background:#fff;font-size:0.85rem;cursor:pointer;">Cancel</button>
+      <button id="bb-apply" onclick="applyBatchBilling()" style="padding:9px 22px;background:#22c55e;color:#fff;border:none;border-radius:6px;font-size:0.85rem;font-weight:700;cursor:pointer;">✓ Apply Selected</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   Batch Billing Import
+   Reads a billing run (xlsx), matches each row to a scheduled CRM invoice by
+   Agreement # (parsed from "Agreement Billing Desc") + GL Month, then stamps
+   the Invoice # and marks the group billed. Shows a preview before committing.
+   ════════════════════════════════════════════════════════════════════════ */
+function openBatchImport(){
+  const f = document.getElementById('batch-file');
+  f.value = '';
+  f.click();
+}
+function closeBatchImport(){
+  document.getElementById('batch-overlay').style.display = 'none';
+  window._batchPlan = null;
+}
+function handleBatchBillingFile(e){
+  const file = e.target.files[0]; if(!file) return;
+  if(typeof XLSX === 'undefined'){ alert('Spreadsheet library not loaded — reload the page and try again.'); return; }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const wb = XLSX.read(ev.target.result, {type:'array'});
+      const { rows, err } = parseBatchRows(wb);
+      if(err){ alert('Could not read this file:\n\n'+err); return; }
+      if(!rows.length){ alert('No billing rows found.\n\nExpected columns like "Agreement Billing Desc", "Invoice", and "GL Month".'); return; }
+      window._batchPlan = buildBatchPlan(rows);
+      renderBatchPreview();
+      document.getElementById('batch-overlay').style.display = 'block';
+    } catch(ex){ alert('Error reading file: '+ex.message); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// Pull GL month → 'YYYY-MM' month key + 'M/1/YYYY' date string.
+function _glToMonth(glRaw, descRaw){
+  let mm, yy;
+  const s = String(glRaw==null?'':glRaw).trim();
+  let mt = s.match(/(\d{1,2})\s*\/\s*(\d{2,4})/);
+  if(mt){ mm = parseInt(mt[1],10); yy = parseInt(mt[2],10); }
+  else {
+    const dm = String(descRaw||'').match(/for\s+(\d{1,2})\/(\d{1,2})\/(\d{2,4})/i);
+    if(dm){ mm = parseInt(dm[1],10); yy = parseInt(dm[3],10); }
+  }
+  if(!mm) return { monthKey:'', dateStr:'' };
+  if(yy < 100) yy = 2000 + yy;
+  return { monthKey: yy + '-' + String(mm).padStart(2,'0'), dateStr: mm + '/1/' + yy };
+}
+
+// Parse the workbook into normalized rows. Column lookup is by header name
+// (first match) so reordered exports still work; the duplicate "BillName"
+// header is handled by taking the first occurrence.
+function parseBatchRows(wb){
+  const sheetName = wb.SheetNames.includes('Sheet1') ? 'Sheet1' : wb.SheetNames[0];
+  if(!sheetName) return { rows:[], err:'No sheets in this workbook.' };
+  const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], {header:1, defval:''});
+  if(!aoa.length) return { rows:[], err:'The sheet is empty.' };
+  const hdr = (aoa[0]||[]).map(h => String(h==null?'':h).trim());
+  const col = name => hdr.findIndex(h => h.toLowerCase() === name.toLowerCase());
+  const ci = {
+    desc:  col('Agreement Billing Desc'),
+    inv:   col('Invoice'),
+    gl:    col('GL Month'),
+    total: col('Invoice Total'),
+    bill:  col('BillName')
+  };
+  if(ci.desc < 0 || ci.inv < 0)
+    return { rows:[], err:'Missing a required column: "Agreement Billing Desc" and/or "Invoice".' };
+  const rows = [];
+  for(let i=1;i<aoa.length;i++){
+    const r = aoa[i]; if(!r) continue;
+    const descRaw = String(r[ci.desc]==null?'':r[ci.desc]).trim();
+    if(!descRaw) continue;
+    const m = descRaw.match(/Agreement\s+(\d+)/i);
+    if(!m) continue;                                   // skip non-agreement rows
+    const agr     = m[1];
+    const invNum  = String(r[ci.inv]==null?'':r[ci.inv]).trim();
+    const glRaw   = ci.gl   >= 0 ? r[ci.gl]   : '';
+    const totalRaw= ci.total>= 0 ? r[ci.total]: '';
+    const total   = parseFloat(String(totalRaw==null?'':totalRaw).replace(/[$,]/g,'')) || 0;
+    const billName= ci.bill >= 0 ? String(r[ci.bill]==null?'':r[ci.bill]).trim() : '';
+    const { monthKey, dateStr } = _glToMonth(glRaw, descRaw);
+    rows.push({ agr, invNum, glRaw:String(glRaw==null?'':glRaw).trim(), total, billName, monthKey, dateStr });
+  }
+  return { rows, err:null };
+}
+
+// Match each file row to a CRM invoice group and decide an action.
+function buildBatchPlan(rows){
+  const plan = [];
+  rows.forEach(row => {
+    const entry = Object.assign({}, row);
+    const rep = DB.find(x => String(x['Agreement#']) === String(row.agr));
+    if(!rep){ entry.status='no-agreement'; entry.action='none'; plan.push(entry); return; }
+    entry.rep = rep;
+    entry.account = rep['Account Name'] || rep['Customer Name'] || '';
+    const mk = row.monthKey;
+    const groups = getAgreementInvoiceGroups(rep);
+
+    const unbilled = groups.find(g => g.monthKey === mk && !g.allBilled);
+    if(unbilled){
+      entry.groupKey  = unbilled.groupKey;
+      entry.crmAmount = unbilled.amount;
+      entry.action    = 'mark';
+      entry.status    = (Math.abs((unbilled.amount||0) - (row.total||0)) > 0.01) ? 'amount-mismatch' : 'ready';
+      plan.push(entry); return;
+    }
+    const billedSame = groups.find(g => g.monthKey === mk && g.allBilled && String(g.invNum) === String(row.invNum));
+    if(billedSame){ entry.status='already-billed'; entry.action='none'; entry.crmAmount=billedSame.amount; plan.push(entry); return; }
+
+    const billedOther = groups.find(g => g.monthKey === mk && g.allBilled);
+    if(billedOther){ entry.status='month-billed-diff'; entry.action='none'; entry.crmAmount=billedOther.amount; entry.existingInv=billedOther.invNum; plan.push(entry); return; }
+
+    // No invoice for that month yet → offer to create a billed one.
+    if(!mk){ entry.status='no-agreement'; entry.action='none'; plan.push(entry); return; } // unreadable GL month
+    entry.status='no-scheduled-row'; entry.action='create'; entry.crmAmount=null;
+    plan.push(entry);
+  });
+  return plan;
+}
+
+function renderBatchPreview(){
+  const plan = window._batchPlan || [];
+  const body = document.getElementById('batch-body');
+  if(!plan.length){
+    body.innerHTML = '<div style="padding:24px;text-align:center;color:#888;">No billable rows found in this file.</div>';
+    document.getElementById('bb-apply').style.display = 'none';
+    return;
+  }
+  const c = {ready:0,warn:0,info:0,skip:0,err:0};
+  plan.forEach(p => {
+    if(p.status==='ready') c.ready++;
+    else if(p.status==='amount-mismatch'||p.status==='month-billed-diff') c.warn++;
+    else if(p.status==='no-scheduled-row') c.info++;
+    else if(p.status==='already-billed') c.skip++;
+    else c.err++;
+  });
+  const badge = p => {
+    switch(p.status){
+      case 'ready':            return '<span class="bb-badge bb-ready">✓ '+fmt(p.crmAmount)+' · ready</span>';
+      case 'amount-mismatch':  return '<span class="bb-badge bb-warn">⚠ CRM '+fmt(p.crmAmount)+' ≠ file '+fmt(p.total)+'</span>';
+      case 'month-billed-diff':return '<span class="bb-badge bb-warn">⚠ month billed as #'+esc(p.existingInv||'?')+'</span>';
+      case 'no-scheduled-row': return '<span class="bb-badge bb-info">＋ no scheduled row · will create</span>';
+      case 'already-billed':   return '<span class="bb-badge bb-skip">already billed</span>';
+      default:                 return '<span class="bb-badge bb-err">agreement not in CRM</span>';
+    }
+  };
+  const rowsHTML = plan.map((p,i) => {
+    const canApply = p.action==='mark' || p.action==='create';
+    const chk = canApply
+      ? '<input type="checkbox" id="bb-chk-'+i+'" '+(p.action==='mark'?'checked':'')+' onchange="updateBatchApplyCount()" style="width:15px;height:15px;cursor:pointer;">'
+      : '';
+    return '<tr>'
+      + '<td style="text-align:center;">'+chk+'</td>'
+      + '<td><b>#'+esc(p.agr)+'</b></td>'
+      + '<td>'+esc(p.account||p.billName||'')+'</td>'
+      + '<td style="white-space:nowrap;">'+esc(p.glRaw||'')+'</td>'
+      + '<td style="white-space:nowrap;">'+esc(p.invNum||'')+'</td>'
+      + '<td style="white-space:nowrap;">'+fmt(p.total)+'</td>'
+      + '<td>'+badge(p)+'</td>'
+      + '</tr>';
+  }).join('');
+  body.innerHTML =
+      '<div class="bb-summary">'
+    +   '<span><b>'+plan.length+'</b> rows</span>'
+    +   '<span><b>'+c.ready+'</b> ready</span>'
+    +   (c.warn ? '<span><b>'+c.warn+'</b> need review</span>' : '')
+    +   (c.info ? '<span><b>'+c.info+'</b> to create</span>' : '')
+    +   (c.skip ? '<span><b>'+c.skip+'</b> already billed</span>' : '')
+    +   (c.err  ? '<span style="color:#c92a2a;"><b>'+c.err+'</b> unmatched</span>' : '')
+    + '</div>'
+    + '<div style="margin-bottom:8px;">'
+    +   '<button onclick="batchSelectAll(true)" style="font-size:0.74rem;border:1px solid var(--gray3);background:#fff;border-radius:5px;padding:3px 9px;cursor:pointer;margin-right:6px;">Select all applicable</button>'
+    +   '<button onclick="batchSelectAll(false)" style="font-size:0.74rem;border:1px solid var(--gray3);background:#fff;border-radius:5px;padding:3px 9px;cursor:pointer;">Clear all</button>'
+    + '</div>'
+    + '<table class="bb"><thead><tr>'
+    +   '<th></th><th>Agr</th><th>Account</th><th>GL Month</th><th>File Inv#</th><th>File Amt</th><th>CRM Status</th>'
+    + '</tr></thead><tbody>'+rowsHTML+'</tbody></table>'
+    + '<div style="font-size:0.72rem;color:#888;margin-top:10px;">Checked rows get their invoice&nbsp;# stamped and are marked <b>billed</b>. “Will create” rows have no scheduled invoice for that month — checking them adds a new billed invoice on the agreement’s primary site. Unmatched and already-billed rows are skipped.</div>';
+  document.getElementById('bb-apply').style.display = '';
+  updateBatchApplyCount();
+}
+
+function updateBatchApplyCount(){
+  const plan = window._batchPlan || []; let n = 0;
+  plan.forEach((p,i) => { const cb = document.getElementById('bb-chk-'+i); if(cb && cb.checked) n++; });
+  const btn = document.getElementById('bb-apply');
+  btn.textContent = '✓ Apply Selected ('+n+')';
+  btn.disabled = (n===0);
+  btn.style.opacity = n===0 ? '0.5' : '1';
+  btn.style.cursor  = n===0 ? 'default' : 'pointer';
+}
+function batchSelectAll(on){
+  const plan = window._batchPlan || [];
+  plan.forEach((p,i) => { const cb = document.getElementById('bb-chk-'+i); if(cb) cb.checked = on; });
+  updateBatchApplyCount();
+}
+
+function applyBatchBilling(){
+  const plan = window._batchPlan || [];
+  let applied = 0, created = 0;
+  const affected = new Set();
+  plan.forEach((p,i) => {
+    const cb = document.getElementById('bb-chk-'+i);
+    if(!cb || !cb.checked) return;
+    if(p.action === 'mark'){
+      const groups = getAgreementInvoiceGroups(p.rep);
+      const g = groups.find(x => x.groupKey === p.groupKey)
+             || groups.find(x => x.monthKey === p.monthKey && !x.allBilled);
+      if(!g) return;
+      g.sites.forEach(s => { s.inv.invNum = String(p.invNum); s.inv.billed = true; });
+      affected.add(p.rep); applied++;
+    } else if(p.action === 'create'){
+      const key = makeKey(p.rep);
+      if(!invoiceDB[key]) invoiceDB[key] = [];
+      invoiceDB[key].push({
+        invNum: String(p.invNum), date: p.dateStr, amount: p.total,
+        period: 'Monthly Service', due: p.rep['Payment Terms'] || 'Net 30 Days',
+        notes: '', billed: true,
+        lineItems: [{ desc: p.rep['Account Name'] || 'Service', qty:1, price: p.total }]
+      });
+      affected.add(p.rep); created++;
+    }
+  });
+  if(applied + created === 0){ closeBatchImport(); return; }
+  affected.forEach(rep => recomputeLastInvoice(rep));
+  saveData();
+  closeBatchImport();
+  if(typeof selectedIdx !== 'undefined' && selectedIdx !== null) renderTab();
+  renderList();
+  showNotice('✓ Batch billing applied — '+applied+' marked billed'+(created ? (', '+created+' created') : ''));
+}
+</script>
 
 </body>
 </html>
