@@ -191,6 +191,27 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--gray1);
 #batch-modal .bb-summary { font-size:0.82rem; color:var(--gray4); margin-bottom:12px; display:flex; gap:14px; flex-wrap:wrap; }
 #batch-modal .bb-summary b { color:var(--navy); }
 
+#export-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1000; overflow-y:auto; padding:30px 16px; }
+#export-modal { background:#fff; border-radius:10px; max-width:840px; margin:0 auto; box-shadow:0 8px 40px rgba(0,0,0,0.25); overflow:hidden; }
+#export-modal .modal-header { background:var(--navy); color:#fff; padding:16px 22px; display:flex; justify-content:space-between; align-items:center; }
+#export-modal .modal-header h2 { font-size:1rem; font-weight:700; margin:0; }
+#export-modal .modal-body { padding:16px 22px; max-height:62vh; overflow-y:auto; }
+#export-modal .modal-footer { padding:14px 22px; background:#f8f9fa; border-top:1px solid var(--gray2); display:flex; justify-content:flex-end; gap:10px; align-items:center; }
+#export-modal table.xp { width:100%; border-collapse:collapse; font-size:0.8rem; }
+#export-modal table.xp th { text-align:left; padding:7px 8px; border-bottom:2px solid var(--gray2); color:var(--gray4); font-size:0.68rem; text-transform:uppercase; letter-spacing:.05em; position:sticky; top:0; background:#fff; }
+#export-modal table.xp td { padding:6px 8px; border-bottom:1px solid var(--gray1); vertical-align:middle; }
+#export-modal .xp-badge { display:inline-block; padding:2px 8px; border-radius:11px; font-size:0.7rem; font-weight:700; white-space:nowrap; }
+#export-modal .xp-billed { background:#e9f7ef; color:#157347; }
+#export-modal .xp-pending{ background:#fff3cd; color:#856404; }
+#export-modal .xp-controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+#export-modal select, #export-modal input { padding:7px 10px; border:1.5px solid var(--gray3); border-radius:6px; font-size:0.83rem; font-family:inherit; outline:none; }
+#export-progress { font-size:0.82rem; color:var(--gray4); margin-right:auto; display:none; }
+#export-progress .bar { display:inline-block; width:160px; height:8px; background:var(--gray2); border-radius:5px; overflow:hidden; vertical-align:middle; margin:0 8px; }
+#export-progress .bar > i { display:block; height:100%; width:0%; background:var(--green); transition:width .15s; }
+/* Off-screen stage used only to rasterize one invoice at a time. */
+#export-stage { position:fixed; left:-10000px; top:0; width:720px; background:#fff; }
+#export-stage .no-print { display:none !important; }
+
 #app { display: flex; height: calc(100vh - 63px); }
 #sidebar { width: 340px; min-width: 280px; background: var(--white); border-right: 1px solid var(--gray3); display: flex; flex-direction: column; overflow: hidden; }
 #main { flex: 1; overflow-y: auto; background: var(--gray1); }
@@ -423,6 +444,7 @@ table.inv-list tr.unbilled:hover td { background: #fff5d6; }
     <button class="hbtn hbtn-outline" onclick="loadFromFile()">📂 Load</button>
     <button class="hbtn hbtn-outline" onclick="refreshFromCloud()" title="Pull the latest data from the cloud">🔄 Refresh from Cloud</button>
     <button class="hbtn hbtn-outline" onclick="openBatchImport()" title="Import a batch billing file: stamp invoice #s onto the matching scheduled invoices and mark them billed">📥 Import Billing</button>
+    <button class="hbtn hbtn-outline" onclick="openExportInvoices()" title="Batch-export every invoice for a billing month as individual PDFs">🧾 Export Invoices</button>
     <input type="file" id="load-file" accept=".json,.xlsx" style="display:none" onchange="handleFileLoad(event)">
     <input type="file" id="batch-file" accept=".xlsx" style="display:none" onchange="handleBatchBillingFile(event)">
   </div>
@@ -6496,6 +6518,283 @@ function applyBatchBilling(){
   if(typeof selectedIdx !== 'undefined' && selectedIdx !== null) renderTab();
   renderList();
   showNotice('✓ Batch billing applied — '+applied+' marked billed'+(created ? (', '+created+' created') : ''));
+}
+</script>
+
+<!-- ═══════════ Export Invoices (batch PDF by month) ═══════════ -->
+<div id="export-overlay" onclick="if(event.target===this)closeExportInvoices()">
+  <div id="export-modal">
+    <div class="modal-header">
+      <h2>🧾 Export Invoices by Month</h2>
+      <button onclick="closeExportInvoices()" style="background:none;border:none;color:#fff;font-size:1.3rem;cursor:pointer;line-height:1;">✕</button>
+    </div>
+    <div class="modal-body" id="export-body"></div>
+    <div class="modal-footer">
+      <span id="export-progress"><span id="export-progress-label">Working…</span><span class="bar"><i id="export-progress-bar"></i></span><span id="export-progress-count"></span></span>
+      <span id="export-error" style="color:#dc2626;font-size:0.8rem;margin-right:auto;display:none;"></span>
+      <button onclick="closeExportInvoices()" style="padding:9px 18px;border:1.5px solid var(--gray3);border-radius:6px;background:#fff;font-size:0.85rem;cursor:pointer;">Close</button>
+      <button id="export-go" onclick="doExportInvoices()" style="padding:9px 22px;background:#1d4ed8;color:#fff;border:none;border-radius:6px;font-size:0.85rem;font-weight:700;cursor:pointer;">⬇ Export Selected</button>
+    </div>
+  </div>
+</div>
+<div id="export-stage" aria-hidden="true"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   Export Invoices — batch PDF by billing month.
+   Reuses each invoice's existing HTML (via the same render path as View),
+   rasterizes it (html2canvas) into a Letter PDF (jsPDF), and saves every
+   invoice as its own file named "Agreement # - Date - Invoice #.pdf".
+   Destination: a folder the user picks (File System Access API, Chrome/Edge);
+   falls back to a single ZIP download where that API is unavailable.
+   The single-invoice Print / Save-as-PDF path is untouched.
+   ════════════════════════════════════════════════════════════════════════ */
+
+// Lazy-load the PDF libraries the first time export runs (keeps initial load fast).
+function _loadScript(src){
+  return new Promise((res,rej)=>{
+    if(document.querySelector('script[data-lib="'+src+'"]')) return res();
+    const s=document.createElement('script'); s.src=src; s.dataset.lib=src;
+    s.onload=()=>res(); s.onerror=()=>rej(new Error('Failed to load '+src));
+    document.head.appendChild(s);
+  });
+}
+let _pdfLibsReady=false;
+async function _loadPdfLibs(){
+  if(_pdfLibsReady) return;
+  await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+  await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+  await _loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+  _pdfLibsReady=true;
+}
+
+// Walk every agreement and collect its invoice groups keyed by month.
+// Returns { '2026-07': [ {agr, groupKey, account, date, invNum, amount, billed, label}, ... ], ... }
+function _collectInvoiceGroupsByMonth(){
+  const byMonth={};
+  const seenAgr=new Set();
+  DB.forEach(r=>{
+    const agr=String(r['Agreement#']); if(seenAgr.has(agr)) return; seenAgr.add(agr);
+    const rep=DB.find(x=>String(x['Agreement#'])===agr); if(!rep) return;
+    let groups; try{ groups=getAgreementInvoiceGroups(rep); }catch(e){ return; }
+    groups.forEach(g=>{
+      if(!g.monthKey) return;
+      (byMonth[g.monthKey]=byMonth[g.monthKey]||[]).push({
+        agr, groupKey:g.groupKey,
+        account: rep['Account Name']||rep['Customer Name']||'',
+        date: g.date, invNum: g.invNum||'', amount: g.amount||0,
+        billed: !!g.allBilled, nSites: g.nSites||g.sites.length||1
+      });
+    });
+  });
+  Object.keys(byMonth).forEach(mk=>byMonth[mk].sort((a,b)=>(parseInt(a.agr,10)||0)-(parseInt(b.agr,10)||0)));
+  return byMonth;
+}
+function _monthLabel(mk){
+  const p=mk.split('-'); if(p.length!==2) return mk;
+  const names=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  return (names[parseInt(p[1],10)-1]||p[1])+' '+p[0];
+}
+
+function openExportInvoices(){
+  window._xpByMonth = _collectInvoiceGroupsByMonth();
+  const months = Object.keys(window._xpByMonth).sort().reverse();
+  const body=document.getElementById('export-body');
+  if(!months.length){ body.innerHTML='<div style="padding:24px;text-align:center;color:#888;">No invoices found to export.</div>'; document.getElementById('export-go').style.display='none'; }
+  else {
+    document.getElementById('export-go').style.display='';
+    // default month = current bill month if present, else newest
+    const now=new Date(); const cur=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+    const defMonth = months.includes(cur)?cur:months[0];
+    body.innerHTML =
+      '<div class="xp-controls">'
+      +  '<label style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--gray4);font-weight:600;">Billing month</label>'
+      +  '<select id="xp-month" onchange="renderExportList()">'+months.map(m=>'<option value="'+m+'"'+(m===defMonth?' selected':'')+'>'+_monthLabel(m)+'</option>').join('')+'</select>'
+      +  '<label style="font-size:0.78rem;display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="xp-billed-only" onchange="renderExportList()" style="width:15px;height:15px;"> Billed only</label>'
+      +  '<span style="flex:1"></span>'
+      +  '<button onclick="exportSelectAll(true)" style="font-size:0.74rem;border:1px solid var(--gray3);background:#fff;border-radius:5px;padding:4px 10px;cursor:pointer;">Select all</button>'
+      +  '<button onclick="exportSelectAll(false)" style="font-size:0.74rem;border:1px solid var(--gray3);background:#fff;border-radius:5px;padding:4px 10px;cursor:pointer;">Clear</button>'
+      +'</div>'
+      +'<div id="xp-list"></div>';
+    renderExportList();
+  }
+  document.getElementById('export-error').style.display='none';
+  document.getElementById('export-progress').style.display='none';
+  document.getElementById('export-overlay').style.display='block';
+}
+function closeExportInvoices(){
+  document.getElementById('export-overlay').style.display='none';
+  window._xpByMonth=null; window._xpRows=null;
+}
+
+function renderExportList(){
+  const mk=document.getElementById('xp-month').value;
+  const billedOnly=document.getElementById('xp-billed-only').checked;
+  let rows=(window._xpByMonth[mk]||[]).slice();
+  if(billedOnly) rows=rows.filter(r=>r.billed);
+  window._xpRows=rows;
+  const list=document.getElementById('xp-list');
+  if(!rows.length){ list.innerHTML='<div style="padding:18px;text-align:center;color:#888;font-size:0.85rem;">No invoices for this selection.</div>'; updateExportCount(); return; }
+  const body=rows.map((r,i)=>(
+    '<tr>'
+    +'<td style="text-align:center;"><input type="checkbox" id="xp-chk-'+i+'" checked onchange="updateExportCount()" style="width:15px;height:15px;cursor:pointer;"></td>'
+    +'<td><b>#'+esc(r.agr)+'</b></td>'
+    +'<td>'+esc(r.account)+(r.nSites>1?' <span style="color:var(--blue);font-size:0.7rem;">· '+r.nSites+' sites</span>':'')+'</td>'
+    +'<td style="white-space:nowrap;">'+esc(r.date||'')+'</td>'
+    +'<td style="white-space:nowrap;">'+(r.invNum?esc(r.invNum):'<span style="color:#aaa;">(none)</span>')+'</td>'
+    +'<td style="white-space:nowrap;">'+fmt(r.amount)+'</td>'
+    +'<td>'+(r.billed?'<span class="xp-badge xp-billed">billed</span>':'<span class="xp-badge xp-pending">pending</span>')+'</td>'
+    +'</tr>'
+  )).join('');
+  list.innerHTML='<table class="xp"><thead><tr><th></th><th>Agr</th><th>Account</th><th>Inv Date</th><th>Inv#</th><th>Amount</th><th>Status</th></tr></thead><tbody>'+body+'</tbody></table>'
+    +'<div style="font-size:0.72rem;color:#888;margin-top:10px;">Each selected invoice exports as its own PDF named <b>Agreement&nbsp;# - Date - Invoice&nbsp;#.pdf</b>. Invoices with no number are named "(no number)". On Chrome/Edge you’ll pick a destination folder; other browsers download a single ZIP.</div>';
+  updateExportCount();
+}
+function exportSelectAll(on){
+  (window._xpRows||[]).forEach((r,i)=>{ const c=document.getElementById('xp-chk-'+i); if(c) c.checked=on; });
+  updateExportCount();
+}
+function _exportCheckedIdx(){
+  const out=[]; (window._xpRows||[]).forEach((r,i)=>{ const c=document.getElementById('xp-chk-'+i); if(c&&c.checked) out.push(i); }); return out;
+}
+function updateExportCount(){
+  const n=_exportCheckedIdx().length;
+  const btn=document.getElementById('export-go');
+  btn.textContent='⬇ Export Selected ('+n+')';
+  btn.disabled=(n===0); btn.style.opacity=n===0?'0.5':'1'; btn.style.cursor=n===0?'default':'pointer';
+}
+
+// Render one invoice group to its HTML + suggested filename, reusing the live
+// View path but never showing the modal (restored synchronously, no repaint).
+function _captureGroupInvoice(agr, groupKey){
+  const docEl=document.getElementById('invoice-doc');
+  const overlay=document.getElementById('invoice-preview');
+  const prevDoc=docEl.innerHTML, prevName=previewFileName, prevDisp=overlay.style.display;
+  try{ viewGroup(agr, groupKey); }catch(e){ overlay.style.display=prevDisp||'none'; docEl.innerHTML=prevDoc; previewFileName=prevName; return null; }
+  const html=docEl.innerHTML;
+  const name=previewFileName||('Agreement '+agr);
+  overlay.style.display=prevDisp||'none'; docEl.innerHTML=prevDoc; previewFileName=prevName;
+  return { html, name };
+}
+function _safeFileName(s){ return String(s||'invoice').replace(/[\\/:*?"<>|]+/g,'-').replace(/\s+/g,' ').trim().slice(0,180); }
+
+// Rasterize the staged invoice into a Letter PDF. Pages break only at safe
+// boundaries — between whole service rows and before the footer block — so a
+// row that would straddle the fold moves intact to the next page (html2canvas
+// ignores CSS page-break hints, so we compute the breaks ourselves).
+async function _invoiceToPdfBlob(html){
+  const stage=document.getElementById('export-stage');
+  stage.innerHTML='<div class="invoice-doc" style="padding:0;width:720px;font-family:\'Segoe UI\',Arial,sans-serif;">'+html+'</div>';
+  await new Promise(r=>setTimeout(r,15)); // let layout settle
+  const target=stage.firstChild;
+  const canvas=await html2canvas(target,{scale:2,backgroundColor:'#ffffff',width:720,windowWidth:720,useCORS:true});
+
+  // Safe break positions (canvas px): the bottom edge of every table row and of
+  // the footer block. We only ever cut at one of these, never through content.
+  const rect=target.getBoundingClientRect();
+  const scaleY=canvas.height/rect.height;
+  const stageTop=rect.top;
+  const atomic=target.querySelectorAll('tr, [style*="border-top:2px solid #333"]');
+  const cutSet=new Set();
+  atomic.forEach(el=>{
+    const b=el.getBoundingClientRect();
+    if(b.height<=0) return;
+    const bottom=Math.round((b.bottom-stageTop)*scaleY);
+    if(bottom>2 && bottom<canvas.height) cutSet.add(bottom);
+  });
+  const cuts=Array.from(cutSet).sort((a,b)=>a-b);
+  stage.innerHTML='';
+
+  const { jsPDF }=window.jspdf;
+  const pdf=new jsPDF('p','pt','letter');
+  const pageW=612, pageH=792, margin=36, contentW=pageW-margin*2; // 540pt
+  const pxPerPt=canvas.width/contentW;
+  const pageMaxPx=Math.floor((pageH-margin*2)*pxPerPt); // canvas px that fit on one page
+
+  let start=0, page=0, guard=0;
+  while(start<canvas.height-1 && guard++<200){
+    const limit=start+pageMaxPx;
+    let end;
+    if(limit>=canvas.height){ end=canvas.height; }
+    else {
+      // largest safe cut in (start, limit]; fall back to a hard cut only if a
+      // single block is taller than a whole page.
+      let best=-1;
+      for(let k=0;k<cuts.length;k++){ const c=cuts[k]; if(c>start && c<=limit) best=c; else if(c>limit) break; }
+      end=(best>start)?best:limit;
+    }
+    const h=end-start;
+    const pc=document.createElement('canvas'); pc.width=canvas.width; pc.height=h;
+    const ctx=pc.getContext('2d'); ctx.fillStyle='#fff'; ctx.fillRect(0,0,pc.width,pc.height);
+    ctx.drawImage(canvas,0,start,canvas.width,h,0,0,canvas.width,h);
+    if(page>0) pdf.addPage();
+    pdf.addImage(pc.toDataURL('image/png'),'PNG',margin,margin,contentW,h/pxPerPt);
+    start=end; page++;
+  }
+  return pdf.output('blob');
+}
+
+async function doExportInvoices(){
+  const idx=_exportCheckedIdx(); if(!idx.length) return;
+  const rows=window._xpRows||[];
+  const mk=document.getElementById('xp-month').value;
+  const goBtn=document.getElementById('export-go');
+  const errEl=document.getElementById('export-error'); errEl.style.display='none';
+  goBtn.disabled=true; goBtn.style.opacity='0.5';
+
+  let dirHandle=null, useFolder=false;
+  if(window.showDirectoryPicker){
+    try{ dirHandle=await window.showDirectoryPicker({mode:'readwrite'}); useFolder=true; }
+    catch(e){ if(e && e.name==='AbortError'){ goBtn.disabled=false; goBtn.style.opacity='1'; return; } }
+  }
+
+  try{ await _loadPdfLibs(); }
+  catch(e){ errEl.textContent='Could not load PDF libraries (check your connection).'; errEl.style.display='inline'; goBtn.disabled=false; goBtn.style.opacity='1'; return; }
+
+  const prog=document.getElementById('export-progress'); prog.style.display='inline-block';
+  const bar=document.getElementById('export-progress-bar'), cnt=document.getElementById('export-progress-count'), lbl=document.getElementById('export-progress-label');
+  lbl.textContent='Exporting…';
+  const zip = (!useFolder && window.JSZip) ? new JSZip() : null;
+  const usedNames={}; let done=0, failed=0; const fails=[];
+
+  for(const i of idx){
+    const row=rows[i];
+    cnt.textContent=(done+1)+' / '+idx.length;
+    bar.style.width=Math.round(done/idx.length*100)+'%';
+    await new Promise(r=>setTimeout(r,0)); // yield so UI updates
+    try{
+      const cap=_captureGroupInvoice(row.agr, row.groupKey);
+      if(!cap){ failed++; fails.push('#'+row.agr); continue; }
+      let fname=_safeFileName(cap.name)+'.pdf';
+      if(usedNames[fname]){ usedNames[fname]++; fname=fname.replace(/\.pdf$/,'')+' ('+usedNames[fname]+').pdf'; } else usedNames[fname]=1;
+      const blob=await _invoiceToPdfBlob(cap.html);
+      if(useFolder){
+        const fh=await dirHandle.getFileHandle(fname,{create:true});
+        const w=await fh.createWritable(); await w.write(blob); await w.close();
+      } else if(zip){
+        zip.file(fname, blob);
+      } else {
+        // Last-resort: individual downloads
+        const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=fname; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),4000);
+      }
+    }catch(e){ failed++; fails.push('#'+row.agr+' ('+(e.message||'error')+')'); }
+    done++;
+  }
+  bar.style.width='100%'; cnt.textContent=idx.length+' / '+idx.length;
+
+  if(zip){
+    lbl.textContent='Zipping…';
+    const content=await zip.generateAsync({type:'blob'});
+    const url=URL.createObjectURL(content); const a=document.createElement('a');
+    a.href=url; a.download='Invoices '+_monthLabel(mk).replace(/\s+/g,'-')+'.zip'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),8000);
+  }
+
+  goBtn.disabled=false; goBtn.style.opacity='1';
+  prog.style.display='none';
+  const okN=done-failed;
+  showNotice('✓ Exported '+okN+' invoice'+(okN!==1?'s':'')+(useFolder?' to your folder':(zip?' (ZIP)':''))+(failed?(' · '+failed+' failed'):''));
+  if(failed){ errEl.textContent=failed+' could not be generated: '+fails.slice(0,6).join(', ')+(fails.length>6?'…':''); errEl.style.display='inline'; }
 }
 </script>
 
