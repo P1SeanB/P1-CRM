@@ -6271,7 +6271,8 @@ init();
    Batch Billing Import
    Reads a billing run (xlsx), matches each row to a scheduled CRM invoice by
    Agreement # (parsed from "Agreement Billing Desc") + Invoice Date, then stamps
-   the Invoice # and marks the group billed. Shows a preview before committing.
+   the Invoice # onto the matching scheduled invoice (left UNbilled for manual
+   review). Shows a preview before committing.
    ════════════════════════════════════════════════════════════════════════ */
 function openBatchImport(){
   const f = document.getElementById('batch-file');
@@ -6390,6 +6391,10 @@ function buildBatchPlan(rows){
     if(unbilled){
       entry.groupKey  = unbilled.groupKey;
       entry.crmAmount = unbilled.amount;
+      // Already stamped with this same invoice # on a prior import → nothing to do.
+      if(String(unbilled.invNum||'') === String(row.invNum)){
+        entry.status='already-imported'; entry.action='none'; plan.push(entry); return;
+      }
       entry.action    = 'mark';
       entry.status    = (Math.abs((unbilled.amount||0) - (row.total||0)) > 0.01) ? 'amount-mismatch' : 'ready';
       plan.push(entry); return;
@@ -6421,15 +6426,16 @@ function renderBatchPreview(){
     if(p.status==='ready') c.ready++;
     else if(p.status==='amount-mismatch'||p.status==='month-billed-diff') c.warn++;
     else if(p.status==='no-scheduled-row') c.info++;
-    else if(p.status==='already-billed') c.skip++;
+    else if(p.status==='already-billed'||p.status==='already-imported') c.skip++;
     else c.err++;
   });
   const badge = p => {
     switch(p.status){
-      case 'ready':            return '<span class="bb-badge bb-ready">✓ '+fmt(p.crmAmount)+' · ready</span>';
+      case 'ready':            return '<span class="bb-badge bb-ready">✓ '+fmt(p.crmAmount)+' · will stamp #</span>';
       case 'amount-mismatch':  return '<span class="bb-badge bb-warn">⚠ CRM '+fmt(p.crmAmount)+' ≠ file '+fmt(p.total)+'</span>';
       case 'month-billed-diff':return '<span class="bb-badge bb-warn">⚠ month billed as #'+esc(p.existingInv||'?')+'</span>';
       case 'no-scheduled-row': return '<span class="bb-badge bb-info">＋ no scheduled row · will create</span>';
+      case 'already-imported': return '<span class="bb-badge bb-skip">already imported</span>';
       case 'already-billed':   return '<span class="bb-badge bb-skip">already billed</span>';
       default:                 return '<span class="bb-badge bb-err">agreement not in CRM</span>';
     }
@@ -6455,7 +6461,7 @@ function renderBatchPreview(){
     +   '<span><b>'+c.ready+'</b> ready</span>'
     +   (c.warn ? '<span><b>'+c.warn+'</b> need review</span>' : '')
     +   (c.info ? '<span><b>'+c.info+'</b> to create</span>' : '')
-    +   (c.skip ? '<span><b>'+c.skip+'</b> already billed</span>' : '')
+    +   (c.skip ? '<span><b>'+c.skip+'</b> already imported</span>' : '')
     +   (c.err  ? '<span style="color:#c92a2a;"><b>'+c.err+'</b> unmatched</span>' : '')
     + '</div>'
     + '<div style="margin-bottom:8px;">'
@@ -6465,7 +6471,7 @@ function renderBatchPreview(){
     + '<table class="bb"><thead><tr>'
     +   '<th></th><th>Agr</th><th>Account</th><th>Inv Date</th><th>File Inv#</th><th>File Amt</th><th>CRM Status</th>'
     + '</tr></thead><tbody>'+rowsHTML+'</tbody></table>'
-    + '<div style="font-size:0.72rem;color:#888;margin-top:10px;">Checked rows get their invoice&nbsp;# stamped and are marked <b>billed</b>. “Will create” rows have no scheduled invoice for that month — checking them adds a new billed invoice on the agreement’s primary site. Unmatched and already-billed rows are skipped.</div>';
+    + '<div style="font-size:0.72rem;color:#888;margin-top:10px;">Checked rows get their invoice&nbsp;# stamped onto the matching scheduled invoice and are left <b>unbilled</b> — you mark them billed manually after they’re reviewed and sent. “Will create” rows have no scheduled invoice for that month; checking them adds a new unbilled invoice on the agreement’s primary site. Unmatched, already-imported, and already-billed rows are skipped.</div>';
   document.getElementById('bb-apply').style.display = '';
   updateBatchApplyCount();
 }
@@ -6497,7 +6503,9 @@ function applyBatchBilling(){
       const g = groups.find(x => x.groupKey === p.groupKey)
              || groups.find(x => x.monthKey === p.monthKey && !x.allBilled);
       if(!g) return;
-      g.sites.forEach(s => { s.inv.invNum = String(p.invNum); s.inv.billed = true; });
+      // Stamp the invoice # only — leave it UNbilled so it can be verified and
+      // marked billed manually once the invoice is generated, reviewed, and sent.
+      g.sites.forEach(s => { s.inv.invNum = String(p.invNum); });
       affected.add(p.rep); applied++;
     } else if(p.action === 'create'){
       const key = makeKey(p.rep);
@@ -6505,7 +6513,7 @@ function applyBatchBilling(){
       invoiceDB[key].push({
         invNum: String(p.invNum), date: p.dateStr, amount: p.total,
         period: 'Monthly Service', due: p.rep['Payment Terms'] || 'Net 30 Days',
-        notes: '', billed: true,
+        notes: '', billed: false,
         lineItems: [{ desc: p.rep['Account Name'] || 'Service', qty:1, price: p.total }]
       });
       affected.add(p.rep); created++;
@@ -6517,7 +6525,7 @@ function applyBatchBilling(){
   closeBatchImport();
   if(typeof selectedIdx !== 'undefined' && selectedIdx !== null) renderTab();
   renderList();
-  showNotice('✓ Batch billing applied — '+applied+' marked billed'+(created ? (', '+created+' created') : ''));
+  showNotice('✓ Imported '+(applied+created)+' invoice'+((applied+created)!==1?'s':'')+' — invoice #s stamped, left unbilled for review');
 }
 </script>
 
